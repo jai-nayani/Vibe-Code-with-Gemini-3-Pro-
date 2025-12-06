@@ -21,8 +21,9 @@ A full-featured website scraper with a Web UI for gathering website content and 
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
-   cd website-scraper
+   git clone https://github.com/jai-nayani/Vibe-Code-with-Gemini-3-Pro-.git
+   cd Vibe-Code-with-Gemini-3-Pro-
+   cd Vibe-Code-with-Gemini-3-Pro--claude-website-scraper-ui-01DUUqh2QE8xmFj4L2jDapGR
    ```
 
 2. **Install dependencies:**
@@ -43,30 +44,37 @@ A full-featured website scraper with a Web UI for gathering website content and 
    ```
 
 2. **Open the Web UI:**
-   Navigate to [http://localhost:3000](http://localhost:3000) in your browser
+   Navigate to [http://localhost:3500](http://localhost:3500) in your browser
 
 3. **Enter a URL and click "Scrape"**
 
+   Each scraping session automatically creates a new numbered folder in `CC_Output/` (1, 2, 3, etc.) to keep your scrapes organized.
+
 ## Output Structure
 
-Scraped content is saved to `./scraped_output/` with the following structure:
+Scraped content is saved to `CC_Output/` with numbered folders for each scraping session. Each run creates a new folder (1, 2, 3, etc.) to keep your scrapes organized:
 
 ```
-scraped_output/
-├── pages/                    # HTML pages
-│   ├── index.html
-│   └── [url_path].html
-├── images/
-│   ├── img_tags/            # Images from <img> tags
-│   ├── css_backgrounds/     # CSS background images
-│   ├── svg_inline/          # Extracted inline SVGs
-│   ├── favicons/            # Favicon files
-│   └── og_meta/             # Open Graph/Twitter images
-├── assets/
-│   ├── css/                 # CSS stylesheets
-│   └── js/                  # JavaScript files
-└── logs/
-    └── scrape_log.json      # Detailed scrape log
+CC_Output/
+├── 1/                       # First scraping session
+│   ├── pages/               # HTML pages
+│   │   ├── index.html
+│   │   └── [url_path].html
+│   ├── images/
+│   │   ├── img_tags/        # Images from <img> tags
+│   │   ├── css_backgrounds/ # CSS background images
+│   │   ├── svg_inline/      # Extracted inline SVGs
+│   │   ├── favicons/        # Favicon files
+│   │   └── og_meta/         # Open Graph/Twitter images
+│   ├── assets/
+│   │   ├── css/             # CSS stylesheets
+│   │   └── js/              # JavaScript files
+│   └── logs/
+│       └── scrape_log.json  # Detailed scrape log
+├── 2/                       # Second scraping session
+│   └── ...
+└── 3/                       # Third scraping session
+    └── ...
 ```
 
 ## Configuration
@@ -75,12 +83,23 @@ Default settings (can be modified in `src/server.js`):
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
+| Port | 3500 | Server port |
 | Max Depth | 5 | Maximum crawl depth from starting URL |
 | Max Concurrent | 3 | Simultaneous requests |
 | Request Delay | 500ms | Minimum delay between requests |
-| Timeout | 30s | Request timeout |
+| Timeout | 60s | Request timeout (increased for slow-loading sites) |
 | Max File Size | 50MB | Maximum size per asset |
 | User-Agent | `MyScraper/1.0` | Scraper identification |
+| Output Directory | `CC_Output/` | Base directory for scraped content (numbered folders) |
+
+### Timeout Handling
+
+The scraper uses a progressive fallback strategy for page loading:
+1. **First attempt**: `domcontentloaded` (60s) - Fastest, waits for DOM to be ready
+2. **Fallback**: `load` (120s) - Waits for page load event
+3. **Final fallback**: `networkidle` (120s) - Waits for network to be idle
+
+This ensures the scraper works reliably even with slow-loading or JavaScript-heavy websites.
 
 ## API Endpoints
 
@@ -132,11 +151,12 @@ The `scrape_log.json` file contains:
 The scraper handles errors gracefully:
 
 - **HTTP 4xx/5xx**: Logged and skipped
-- **Timeout**: Logged and skipped
+- **Timeout**: Automatically retries with less strict loading strategies
 - **Invalid URLs**: Logged and skipped
 - **robots.txt disallowed**: Skipped silently
+- **Slow-loading pages**: Progressive fallback to faster loading strategies
 
-Individual errors never crash the entire scrape job.
+Individual errors never crash the entire scrape job. The scraper will attempt multiple loading strategies before giving up on a page.
 
 ## Limitations
 
