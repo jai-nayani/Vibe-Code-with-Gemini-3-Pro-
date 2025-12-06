@@ -59,7 +59,8 @@ function broadcast(type, data) {
 
 // Get next run number from CC_Output folder
 async function getNextRunNumber() {
-  const ccOutputPath = path.join(__dirname, '../../../CC_Output');
+  // CC_Output is in the project root (one level up from src/)
+  const ccOutputPath = path.join(__dirname, '../CC_Output');
   
   try {
     // Ensure CC_Output directory exists
@@ -134,7 +135,7 @@ app.post('/api/start', async (req, res) => {
 
   // Get next run number and create output directory path
   const runNumber = await getNextRunNumber();
-  const outputDir = path.join(__dirname, '../../../CC_Output', runNumber.toString());
+  const outputDir = path.join(__dirname, '../CC_Output', runNumber.toString());
 
   // Create new scraper instance
   scraper = new WebScraper({

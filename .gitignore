@@ -3,7 +3,11 @@ node_modules/
 
 # Output directory
 scraped_output/
-CC_Output/
+
+# CC_Output folder structure is included, but ignore scraped data (numbered folders)
+CC_Output/*
+!CC_Output/.gitkeep
+!CC_Output/README.md
 
 # Environment
 .env
