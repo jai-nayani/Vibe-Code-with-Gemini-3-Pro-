@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Output directory
+scraped_output/
+CC_Output/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

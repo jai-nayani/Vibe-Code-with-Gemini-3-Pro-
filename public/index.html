@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Website Scraper</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🌐 Website Scraper</h1>
+      <p class="subtitle">Gather website content and assets for your projects</p>
+    </header>
+
+    <main>
+      <section class="input-section">
+        <div class="url-input-group">
+          <label for="url-input">URL:</label>
+          <input
+            type="url"
+            id="url-input"
+            placeholder="https://example.com"
+            autocomplete="url"
+          >
+          <button id="scrape-btn" class="btn btn-primary">Scrape</button>
+        </div>
+      </section>
+
+      <section class="status-section">
+        <div class="status-card">
+          <div class="status-header">
+            <span class="status-label">Status:</span>
+            <span id="status-text" class="status-value">Idle</span>
+          </div>
+
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+            </div>
+            <span id="progress-text" class="progress-text">0%</span>
+          </div>
+
+          <div class="stats-grid">
+            <div class="stat-item">
+              <span class="stat-label">Pages</span>
+              <span id="pages-count" class="stat-value">0</span>
+              <span class="stat-suffix">scraped</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Images</span>
+              <span id="images-count" class="stat-value">0</span>
+              <span class="stat-suffix">downloaded</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Errors</span>
+              <span id="errors-count" class="stat-value">0</span>
+              <span class="stat-suffix">skipped</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Queue</span>
+              <span id="queue-count" class="stat-value">0</span>
+              <span class="stat-suffix">pending</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="log-section">
+        <div class="log-header">
+          <h3>Live Log</h3>
+          <button id="clear-log-btn" class="btn btn-small">Clear</button>
+        </div>
+        <div id="log-container" class="log-container">
+          <div class="log-placeholder">Waiting for scraping to start...</div>
+        </div>
+      </section>
+
+      <section class="actions-section">
+        <button id="stop-btn" class="btn btn-danger" disabled>Stop</button>
+        <div class="right-actions">
+          <button id="download-log-btn" class="btn btn-secondary" disabled>Download Log</button>
+          <button id="open-output-btn" class="btn btn-secondary" disabled>Output Directory</button>
+        </div>
+      </section>
+
+      <section id="completion-section" class="completion-section hidden">
+        <div class="completion-card">
+          <h3 id="completion-title">Scraping Complete!</h3>
+          <div class="completion-stats">
+            <div class="completion-stat">
+              <span class="completion-stat-value" id="final-pages">0</span>
+              <span class="completion-stat-label">Pages</span>
+            </div>
+            <div class="completion-stat">
+              <span class="completion-stat-value" id="final-images">0</span>
+              <span class="completion-stat-label">Images</span>
+            </div>
+            <div class="completion-stat">
+              <span class="completion-stat-value" id="final-errors">0</span>
+              <span class="completion-stat-label">Errors</span>
+            </div>
+            <div class="completion-stat">
+              <span class="completion-stat-value" id="final-size">0 KB</span>
+              <span class="completion-stat-label">Total Size</span>
+            </div>
+          </div>
+          <p id="output-path" class="output-path"></p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Website Scraper v1.0 | Respects robots.txt | Max 5 levels deep</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
