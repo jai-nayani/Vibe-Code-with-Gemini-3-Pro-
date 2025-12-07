@@ -6,6 +6,7 @@ A full-featured website scraper with a Web UI for gathering website content and 
 
 - **Web-based UI** - Easy-to-use browser interface with real-time progress updates
 - **JavaScript Rendering** - Uses Playwright headless browser to capture dynamically rendered content
+- **Full-Page Screenshots** - Captures full-page PNG screenshots of every page for visual analysis
 - **Comprehensive Image Extraction**:
   - `<img>` tag `src` and `srcset` attributes
   - CSS `background-image` properties
@@ -65,7 +66,8 @@ CC_Output/
 │   │   ├── css_backgrounds/ # CSS background images
 │   │   ├── svg_inline/      # Extracted inline SVGs
 │   │   ├── favicons/        # Favicon files
-│   │   └── og_meta/         # Open Graph/Twitter images
+│   │   ├── og_meta/         # Open Graph/Twitter images
+│   │   └── web_screenshots/ # Full-page screenshots of each page
 │   ├── assets/
 │   │   ├── css/             # CSS stylesheets
 │   │   └── js/              # JavaScript files
@@ -128,11 +130,13 @@ The `scrape_log.json` file contains:
   "stats": {
     "pages_scraped": 42,
     "images_downloaded": 156,
+    "screenshots_captured": 42,
     "errors_encountered": 3,
     "total_size_bytes": 15234567
   },
   "pages": [...],
   "images": [...],
+  "screenshots": [...],
   "errors": [...]
 }
 ```
