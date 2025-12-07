@@ -16,6 +16,7 @@ export class FileManager {
       'images/svg_inline',
       'images/favicons',
       'images/og_meta',
+      'images/web_screenshots',
       'assets/css',
       'assets/js',
       'logs'
@@ -150,6 +151,42 @@ export class FileManager {
       await fs.writeFile(filePath, content, 'utf-8');
     }
 
+    return `${dir}/${uniqueFilename}`;
+  }
+
+  urlToScreenshotFilename(url) {
+    try {
+      const parsed = new URL(url);
+      let pathname = parsed.pathname;
+
+      // Handle root path
+      if (pathname === '/' || pathname === '') {
+        return 'screenshot_index.png';
+      }
+
+      // Remove leading/trailing slashes and convert to filename
+      pathname = pathname.replace(/^\/+|\/+$/g, '');
+
+      // Replace slashes with underscores
+      let filename = 'screenshot_' + pathname.replace(/\//g, '_');
+
+      // Add .png extension
+      filename += '.png';
+
+      return this.sanitizeFilename(filename);
+    } catch {
+      return 'screenshot_' + this.generateHash(url) + '.png';
+    }
+  }
+
+  async saveScreenshot(url, screenshotBuffer) {
+    const dir = 'images/web_screenshots';
+    const fullDir = path.join(this.outputDir, dir);
+    const filename = this.urlToScreenshotFilename(url);
+    const uniqueFilename = await this.getUniqueFilename(fullDir, filename);
+    const filePath = path.join(fullDir, uniqueFilename);
+
+    await fs.writeFile(filePath, screenshotBuffer);
     return `${dir}/${uniqueFilename}`;
   }
 

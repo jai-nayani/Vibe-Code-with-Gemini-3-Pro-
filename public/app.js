@@ -12,6 +12,7 @@ const progressText = document.getElementById('progress-text');
 
 const pagesCount = document.getElementById('pages-count');
 const imagesCount = document.getElementById('images-count');
+const screenshotsCount = document.getElementById('screenshots-count');
 const errorsCount = document.getElementById('errors-count');
 const queueCount = document.getElementById('queue-count');
 
@@ -21,6 +22,7 @@ const completionSection = document.getElementById('completion-section');
 const completionTitle = document.getElementById('completion-title');
 const finalPages = document.getElementById('final-pages');
 const finalImages = document.getElementById('final-images');
+const finalScreenshots = document.getElementById('final-screenshots');
 const finalErrors = document.getElementById('final-errors');
 const finalSize = document.getElementById('final-size');
 const outputPath = document.getElementById('output-path');
@@ -95,6 +97,7 @@ function updateStatus(data) {
   if (data.stats) {
     pagesCount.textContent = data.stats.pagesScraped || 0;
     imagesCount.textContent = data.stats.imagesDownloaded || 0;
+    screenshotsCount.textContent = data.stats.screenshotsCaptured || 0;
     errorsCount.textContent = data.stats.errorsEncountered || 0;
   }
 
@@ -113,6 +116,7 @@ function updateProgress(data) {
   // Update stats
   pagesCount.textContent = data.pagesScraped || 0;
   imagesCount.textContent = data.imagesDownloaded || 0;
+  screenshotsCount.textContent = data.screenshotsCaptured || 0;
   errorsCount.textContent = data.errorsEncountered || 0;
   queueCount.textContent = data.queueLength || 0;
 
@@ -173,6 +177,7 @@ function handleComplete(data) {
   if (data.stats) {
     finalPages.textContent = data.stats.pagesScraped || 0;
     finalImages.textContent = data.stats.imagesDownloaded || 0;
+    finalScreenshots.textContent = data.stats.screenshotsCaptured || 0;
     finalErrors.textContent = data.stats.errorsEncountered || 0;
     finalSize.textContent = formatBytes(data.stats.totalSizeBytes || 0);
   }
@@ -225,6 +230,7 @@ async function startScraping() {
   logContainer.innerHTML = '';
   pagesCount.textContent = '0';
   imagesCount.textContent = '0';
+  screenshotsCount.textContent = '0';
   errorsCount.textContent = '0';
   queueCount.textContent = '0';
   progressFill.style.width = '0%';

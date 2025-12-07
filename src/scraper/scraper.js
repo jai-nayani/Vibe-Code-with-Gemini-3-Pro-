@@ -33,6 +33,7 @@ export class WebScraper {
     this.stats = {
       pagesScraped: 0,
       imagesDownloaded: 0,
+      screenshotsCaptured: 0,
       errorsEncountered: 0,
       totalSizeBytes: 0
     };
@@ -40,6 +41,7 @@ export class WebScraper {
     // Logging
     this.pageLog = [];
     this.imageLog = [];
+    this.screenshotLog = [];
     this.errorLog = [];
 
     // Callbacks
@@ -65,6 +67,7 @@ export class WebScraper {
         status: this.isRunning ? 'scraping' : (this.shouldStop ? 'stopped' : 'complete'),
         pagesScraped: this.stats.pagesScraped,
         imagesDownloaded: this.stats.imagesDownloaded,
+        screenshotsCaptured: this.stats.screenshotsCaptured,
         errorsEncountered: this.stats.errorsEncountered,
         queueLength: this.urlQueue.length,
         activeRequests: this.activeRequests
@@ -118,7 +121,7 @@ export class WebScraper {
       this.completedAt = new Date().toISOString();
       await this.saveLog();
 
-      this.log(`Scrape complete. Pages: ${this.stats.pagesScraped}, Images: ${this.stats.imagesDownloaded}, Errors: ${this.stats.errorsEncountered}`);
+      this.log(`Scrape complete. Pages: ${this.stats.pagesScraped}, Images: ${this.stats.imagesDownloaded}, Screenshots: ${this.stats.screenshotsCaptured}, Errors: ${this.stats.errorsEncountered}`);
 
       if (this.onComplete) {
         this.onComplete({
@@ -272,6 +275,9 @@ export class WebScraper {
       // Get page content
       const html = await page.content();
 
+      // Capture full-page screenshot
+      await this.capturePageScreenshot(page, url);
+
       // Save page
       const localPath = await this.fileManager.savePage(url, html);
       this.stats.pagesScraped++;
@@ -329,6 +335,57 @@ export class WebScraper {
     } finally {
       await page.close();
       await context.close();
+    }
+  }
+
+  async capturePageScreenshot(page, url) {
+    try {
+      this.log(`Capturing screenshot: ${url}`);
+
+      // Capture full-page screenshot
+      const screenshotBuffer = await page.screenshot({
+        fullPage: true,
+        type: 'png'
+      });
+
+      // Save screenshot
+      const localPath = await this.fileManager.saveScreenshot(url, screenshotBuffer);
+      this.stats.screenshotsCaptured++;
+      this.stats.totalSizeBytes += screenshotBuffer.length;
+
+      // Extract page metadata for the screenshot log
+      const metadata = await page.evaluate(() => ({
+        title: document.title,
+        description: document.querySelector('meta[name="description"]')?.content || null,
+        ogImage: document.querySelector('meta[property="og:image"]')?.content || null,
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight
+        },
+        scrollHeight: document.documentElement.scrollHeight
+      }));
+
+      this.screenshotLog.push({
+        url,
+        local_path: localPath,
+        metadata,
+        size_bytes: screenshotBuffer.length,
+        status: 'success',
+        timestamp: new Date().toISOString()
+      });
+
+      this.log(`Saved screenshot: ${localPath} (${Math.round(screenshotBuffer.length / 1024)}KB)`);
+      this.emitProgress();
+
+    } catch (error) {
+      this.log(`Screenshot error for ${url}: ${error.message}`, 'error');
+      this.screenshotLog.push({
+        url,
+        local_path: null,
+        status: 'failed',
+        error: error.message,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
@@ -536,11 +593,13 @@ export class WebScraper {
       stats: {
         pages_scraped: this.stats.pagesScraped,
         images_downloaded: this.stats.imagesDownloaded,
+        screenshots_captured: this.stats.screenshotsCaptured,
         errors_encountered: this.stats.errorsEncountered,
         total_size_bytes: this.stats.totalSizeBytes
       },
       pages: this.pageLog,
       images: this.imageLog,
+      screenshots: this.screenshotLog,
       errors: this.errorLog
     };
 
