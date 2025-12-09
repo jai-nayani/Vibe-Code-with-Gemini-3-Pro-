@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { WebScraper } from './scraper/scraper.js';
+import { Storage } from '@google-cloud/storage';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +15,10 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
 const PORT = process.env.PORT || 3500;
+
+// Cloud Storage setup
+const storage = new Storage();
+const bucketName = 'vibe-scraper-output';
 
 // Current scraper instance
 let scraper = null;
@@ -91,6 +96,40 @@ async function getNextRunNumber() {
   }
 }
 
+// Upload directory to Cloud Storage
+async function uploadDirectoryToBucket(localDir, bucketName) {
+  const bucket = storage.bucket(bucketName);
+  
+  async function uploadRecursive(dirPath, bucketPrefix = '') {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      const bucketPath = path.join(bucketPrefix, entry.name).replace(/\\/g, '/');
+      
+      if (entry.isDirectory()) {
+        await uploadRecursive(fullPath, bucketPath);
+      } else {
+        try {
+          await bucket.upload(fullPath, {
+            destination: `scrapes/${path.basename(localDir)}/${bucketPath}`,
+          });
+          console.log('Uploaded:', fullPath);
+        } catch (error) {
+          console.error(`Error uploading ${fullPath}:`, error.message);
+        }
+      }
+    }
+  }
+  
+  try {
+    await uploadRecursive(localDir);
+    console.log(`Successfully uploaded ${localDir} to ${bucketName}`);
+  } catch (error) {
+    console.error(`Error uploading directory ${localDir}:`, error.message);
+  }
+}
+
 // Root route - serve index.html
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
@@ -160,8 +199,15 @@ app.post('/api/start', async (req, res) => {
     broadcast('log', logEntry);
   };
 
-  scraper.onComplete = (result) => {
+  scraper.onComplete = async (result) => {
     broadcast('complete', result);
+    
+    // Upload scrape output to Cloud Storage
+    try {
+      await uploadDirectoryToBucket(outputDir, bucketName);
+    } catch (error) {
+      console.error('Error uploading to Cloud Storage:', error.message);
+    }
   };
 
   // Start scraping in background
