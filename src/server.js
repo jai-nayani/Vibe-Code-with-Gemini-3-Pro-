@@ -91,6 +91,11 @@ async function getNextRunNumber() {
   }
 }
 
+// Root route - serve index.html
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
 // REST API Endpoints
 
 // Get current status
