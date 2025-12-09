@@ -140,7 +140,7 @@ The `scrape_log.json` file contains:
   "errors": [...]
 }
 ```
-# Trigger build
+
 
 ## Technical Details
 
