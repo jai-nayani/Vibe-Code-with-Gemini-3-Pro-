@@ -1,5 +1,5 @@
 # Use official Playwright base image (includes Chromium + dependencies)
-FROM mcr.microsoft.com/playwright:v1.40.1-jammy
+FROM mcr.microsoft.com/playwright:v1.57.0-jammy
 
 WORKDIR /app
 
