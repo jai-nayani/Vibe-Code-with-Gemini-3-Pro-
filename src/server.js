@@ -209,6 +209,163 @@ app.get('/api/log', async (req, res) => {
   }
 });
 
+// ===========================================
+// AI STUDIO API ENDPOINT - Returns LLM-ready data
+// ===========================================
+app.post('/api/scrape-for-llm', async (req, res) => {
+  const { url, maxPages = 1 } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  // Validate URL
+  try {
+    new URL(url);
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL format' });
+  }
+
+  console.log(`[AI Studio API] Scraping: ${url}`);
+
+  const { chromium } = await import('playwright');
+  let browser = null;
+
+  try {
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({
+      userAgent: 'WebsiteRebuilder/1.0'
+    });
+    const page = await context.newPage();
+
+    // Navigate to page
+    await page.goto(url, { 
+      waitUntil: 'domcontentloaded',
+      timeout: 30000 
+    });
+
+    // Wait a bit for dynamic content
+    await page.waitForTimeout(2000);
+
+    // Get page content
+    const html = await page.content();
+    const title = await page.title();
+
+    // Take screenshot (viewport only, not full page - smaller size)
+    const screenshotBuffer = await page.screenshot({
+      type: 'png',
+      fullPage: false
+    });
+    const screenshotBase64 = screenshotBuffer.toString('base64');
+
+    // Extract key information using page.evaluate
+    const extraction = await page.evaluate(() => {
+      // Get meta description
+      const metaDesc = document.querySelector('meta[name="description"]')?.content || 
+                       document.querySelector('meta[property="og:description"]')?.content || '';
+      
+      // Get headings
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3'))
+        .slice(0, 20)
+        .map(h => h.textContent.trim())
+        .filter(t => t.length > 0 && t.length < 200);
+
+      // Get navigation items
+      const navItems = Array.from(document.querySelectorAll('nav a, header a'))
+        .slice(0, 15)
+        .map(a => a.textContent.trim())
+        .filter(t => t.length > 0 && t.length < 50);
+
+      // Get body text (cleaned, limited)
+      const bodyText = document.body.innerText
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 5000);
+
+      // Get contact info
+      const pageText = document.body.innerText;
+      const phoneMatch = pageText.match(/(\+?1?\s*[-.]?\s*)?(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/);
+      const emailMatch = pageText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+
+      // Get colors from computed styles (sample)
+      const colors = new Set();
+      document.querySelectorAll('*').forEach(el => {
+        const style = getComputedStyle(el);
+        const bg = style.backgroundColor;
+        const color = style.color;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') colors.add(bg);
+        if (color) colors.add(color);
+      });
+
+      // Get images info
+      const images = Array.from(document.querySelectorAll('img'))
+        .slice(0, 10)
+        .map(img => ({
+          src: img.src,
+          alt: img.alt,
+          isLogo: img.className.toLowerCase().includes('logo') || 
+                  img.src.toLowerCase().includes('logo') ||
+                  img.alt.toLowerCase().includes('logo')
+        }));
+
+      return {
+        metaDescription: metaDesc.substring(0, 500),
+        headings: [...new Set(headings)],
+        navigation: [...new Set(navItems)],
+        bodyText,
+        contactInfo: {
+          phone: phoneMatch ? phoneMatch[0] : null,
+          email: emailMatch ? emailMatch[0] : null
+        },
+        colors: Array.from(colors).slice(0, 10),
+        images
+      };
+    });
+
+    await browser.close();
+    browser = null;
+
+    // Build response
+    const response = {
+      success: true,
+      url,
+      timestamp: new Date().toISOString(),
+      screenshot: {
+        base64: screenshotBase64,
+        mimeType: 'image/png'
+      },
+      content: {
+        title,
+        metaDescription: extraction.metaDescription,
+        headings: extraction.headings,
+        navigation: extraction.navigation,
+        bodyText: extraction.bodyText,
+        contactInfo: extraction.contactInfo
+      },
+      design: {
+        colors: extraction.colors
+      },
+      images: extraction.images
+    };
+
+    console.log(`[AI Studio API] Success: ${url}`);
+    res.json(response);
+
+  } catch (error) {
+    console.error(`[AI Studio API] Error: ${error.message}`);
+    if (browser) await browser.close();
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Health check endpoint for AI Studio
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', service: 'website-scraper', timestamp: new Date().toISOString() });
+});
+
 // Start server
 server.listen(PORT, () => {
   console.log(`\n🌐 Website Scraper is running!`);
