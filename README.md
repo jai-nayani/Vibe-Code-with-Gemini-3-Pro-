@@ -12,7 +12,7 @@ A full-featured website scraper with a Web UI for gathering website content and 
   - CSS `background-image` properties
   - Inline SVGs
   - Favicons
-  - Open Graph and Twitter Card images
+  - Open Graph and Twitter Card imgs
 - **Respects robots.txt** - Automatically fetches and honors robots.txt directives
 - **Rate Limiting** - Configurable delays and concurrent request limits
 - **Organized Output** - Clean directory structure for scraped content
