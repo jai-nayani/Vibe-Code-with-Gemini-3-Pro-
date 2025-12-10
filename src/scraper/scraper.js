@@ -342,14 +342,14 @@ export class WebScraper {
     try {
       this.log(`Capturing screenshot: ${url}`);
 
-      // Capture full-page screenshot
+      // Capture full-page screenshot (initial state)
       const screenshotBuffer = await page.screenshot({
         fullPage: true,
         type: 'png'
       });
 
       // Save screenshot
-      const localPath = await this.fileManager.saveScreenshot(url, screenshotBuffer);
+      const localPath = await this.fileManager.saveScreenshot(url, screenshotBuffer, 'initial');
       this.stats.screenshotsCaptured++;
       this.stats.totalSizeBytes += screenshotBuffer.length;
 
@@ -368,6 +368,7 @@ export class WebScraper {
       this.screenshotLog.push({
         url,
         local_path: localPath,
+        type: 'initial',
         metadata,
         size_bytes: screenshotBuffer.length,
         status: 'success',
@@ -377,16 +378,225 @@ export class WebScraper {
       this.log(`Saved screenshot: ${localPath} (${Math.round(screenshotBuffer.length / 1024)}KB)`);
       this.emitProgress();
 
+      // Now capture interactive states (clicks on buttons, tabs, nav items)
+      await this.captureInteractiveScreenshots(page, url);
+
     } catch (error) {
       this.log(`Screenshot error for ${url}: ${error.message}`, 'error');
       this.screenshotLog.push({
         url,
         local_path: null,
+        type: 'initial',
         status: 'failed',
         error: error.message,
         timestamp: new Date().toISOString()
       });
     }
+  }
+
+  async captureInteractiveScreenshots(page, url) {
+    try {
+      this.log(`Finding interactive elements on: ${url}`);
+
+      // Find all clickable elements that might reveal new content
+      const clickableElements = await page.evaluate(() => {
+        const elements = [];
+        const seen = new Set();
+
+        // Selectors for interactive elements
+        const selectors = [
+          'nav a',
+          'nav button',
+          'header a',
+          'header button',
+          '[role="tab"]',
+          '[role="button"]',
+          '.nav-link',
+          '.tab',
+          '.tabs button',
+          '.tabs a',
+          '.menu-item',
+          '.menu a',
+          '.navbar a',
+          '.navbar button',
+          'button:not([type="submit"])',
+          '[data-toggle]',
+          '[data-bs-toggle]',
+          '.accordion-button',
+          '.collapse-toggle',
+          '[onclick]',
+          'a[href^="#"]',
+          'a[href=""]',
+          'a[href="javascript"]',
+          '.card[onclick]',
+          '.clickable'
+        ];
+
+        for (const selector of selectors) {
+          try {
+            const els = document.querySelectorAll(selector);
+            for (const el of els) {
+              // Skip if not visible
+              const rect = el.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) continue;
+
+              // Skip if already processed (by text content)
+              const text = (el.textContent || '').trim().substring(0, 50);
+              const identifier = `${el.tagName}-${text}-${Math.round(rect.x)}-${Math.round(rect.y)}`;
+              if (seen.has(identifier)) continue;
+              seen.add(identifier);
+
+              // Skip external links
+              if (el.tagName === 'A') {
+                const href = el.getAttribute('href') || '';
+                if (href.startsWith('http') && !href.includes(window.location.hostname)) continue;
+                if (href.startsWith('mailto:') || href.startsWith('tel:')) continue;
+              }
+
+              // Skip form submit buttons
+              if (el.type === 'submit') continue;
+
+              // Get element info
+              elements.push({
+                tag: el.tagName,
+                text: text || el.getAttribute('aria-label') || el.getAttribute('title') || 'element',
+                selector: selector,
+                href: el.getAttribute('href') || null,
+                x: rect.x + rect.width / 2,
+                y: rect.y + rect.height / 2,
+                index: elements.length
+              });
+            }
+          } catch (e) {
+            // Ignore selector errors
+          }
+        }
+
+        return elements.slice(0, 20); // Limit to 20 interactive elements
+      });
+
+      this.log(`Found ${clickableElements.length} interactive elements`);
+
+      // Track which states we've already captured
+      const capturedStates = new Set();
+
+      for (const element of clickableElements) {
+        if (this.shouldStop) break;
+
+        try {
+          // Create a clean name for this state
+          const stateName = this.sanitizeStateName(element.text || `element_${element.index}`);
+
+          // Skip if we've already captured a similar state
+          if (capturedStates.has(stateName)) continue;
+          capturedStates.add(stateName);
+
+          this.log(`Clicking: "${element.text}" (${element.tag})`);
+
+          // Store current scroll position and URL
+          const beforeUrl = page.url();
+          const beforeScroll = await page.evaluate(() => window.scrollY);
+
+          // Click the element
+          await page.mouse.click(element.x, element.y);
+
+          // Wait for potential content changes
+          await this.delay(800); // Wait for animations
+
+          // Check if URL changed (navigation happened)
+          const afterUrl = page.url();
+          if (afterUrl !== beforeUrl && !afterUrl.includes('#')) {
+            // Page navigated - go back
+            this.log(`Navigation detected, going back...`);
+            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+            await this.delay(500);
+            continue;
+          }
+
+          // Wait for any animations to complete
+          await page.evaluate(() => {
+            return new Promise(resolve => {
+              requestAnimationFrame(() => {
+                requestAnimationFrame(resolve);
+              });
+            });
+          });
+
+          // Check if content actually changed
+          const hasNewContent = await page.evaluate(() => {
+            // Look for newly visible elements
+            const visibleModals = document.querySelectorAll('.modal.show, .modal[style*="display: block"], [role="dialog"]:not([hidden])');
+            const visibleDropdowns = document.querySelectorAll('.dropdown-menu.show, .dropdown.open, [aria-expanded="true"]');
+            const activeTabs = document.querySelectorAll('.tab-pane.active, .tab-content.active, [role="tabpanel"]:not([hidden])');
+            const expandedAccordions = document.querySelectorAll('.accordion-collapse.show, .collapse.show');
+
+            return visibleModals.length > 0 ||
+                   visibleDropdowns.length > 0 ||
+                   activeTabs.length > 0 ||
+                   expandedAccordions.length > 0 ||
+                   document.querySelector('.active, .selected, .open, .expanded, .show');
+          });
+
+          // Capture screenshot of this state
+          const screenshotBuffer = await page.screenshot({
+            fullPage: true,
+            type: 'png'
+          });
+
+          // Save with state name
+          const localPath = await this.fileManager.saveScreenshot(url, screenshotBuffer, stateName);
+          this.stats.screenshotsCaptured++;
+          this.stats.totalSizeBytes += screenshotBuffer.length;
+
+          this.screenshotLog.push({
+            url,
+            local_path: localPath,
+            type: 'interactive',
+            trigger: {
+              element: element.tag,
+              text: element.text,
+              action: 'click'
+            },
+            size_bytes: screenshotBuffer.length,
+            status: 'success',
+            timestamp: new Date().toISOString()
+          });
+
+          this.log(`Saved interactive screenshot: ${localPath} (${Math.round(screenshotBuffer.length / 1024)}KB)`);
+          this.emitProgress();
+
+          // Try to reset the state (close modals, reset tabs, etc.)
+          await page.evaluate(() => {
+            // Press Escape to close any modals/dropdowns
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+            // Click outside to close dropdowns
+            document.body.click();
+          });
+
+          await this.delay(300);
+
+          // Restore scroll position
+          await page.evaluate((scrollY) => window.scrollTo(0, scrollY), beforeScroll);
+
+        } catch (error) {
+          this.log(`Interactive screenshot error for "${element.text}": ${error.message}`, 'error');
+        }
+      }
+
+      this.log(`Captured ${capturedStates.size} interactive states`);
+
+    } catch (error) {
+      this.log(`Error capturing interactive screenshots: ${error.message}`, 'error');
+    }
+  }
+
+  sanitizeStateName(text) {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .substring(0, 30) || 'state';
   }
 
   async downloadAsset(url, type, retries = 1) {
