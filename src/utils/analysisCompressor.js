@@ -12,6 +12,15 @@ export class AnalysisCompressor {
     console.log(`[${new Date().toISOString()}] [AnalysisCompressor] ${message}`);
   }
 
+  // Get signed URL for a file (valid for 7 days)
+  async getSignedUrl(filePath) {
+    const [url] = await this.bucket.file(filePath).getSignedUrl({
+      action: 'read',
+      expires: Date.now() + 7 * 24 * 60 * 60 * 1000  // 7 days
+    });
+    return url;
+  }
+
   // Find the most recent scrape folder
   async findLatestScrape() {
     this.log('Finding latest scrape...');
@@ -423,7 +432,9 @@ export class AnalysisCompressor {
           contentType: 'image/jpeg',
           metadata: { cacheControl: 'public, max-age=3600' }
         });
-        await this.bucket.file(outputPath).makePublic();
+
+        // Get signed URL for the screenshot
+        const screenshotUrl = await this.getSignedUrl(outputPath);
 
         compressedScreenshots.push({
           id: filename.replace('.jpg', ''),
@@ -431,7 +442,7 @@ export class AnalysisCompressor {
                 screenshot.local_path.match(/screenshot_([^_]+)_/)?.[1] || 'unknown',
           state: screenshot.type || 'initial',
           filename,
-          url: `https://storage.googleapis.com/${this.bucketName}/${outputPath}`,
+          url: screenshotUrl,
           dimensions: `${metadata.width}x${metadata.height}`,
           sizeBytes: compressed.length
         });
@@ -577,9 +588,11 @@ export class AnalysisCompressor {
       i.url?.toLowerCase().includes('logo')
     );
     if (logoImage) {
+      const logoPath = `scrapes/${scrapeId}/${logoImage.local_path}`;
+      const logoUrl = await this.getSignedUrl(logoPath);
       analysisPackage.assets.logo = {
         found: true,
-        url: `https://storage.googleapis.com/${this.bucketName}/scrapes/${scrapeId}/${logoImage.local_path}`,
+        url: logoUrl,
         dimensions: null
       };
     }
@@ -599,8 +612,6 @@ export class AnalysisCompressor {
       metadata: { cacheControl: 'public, max-age=3600' }
     });
 
-    await this.bucket.file(outputPath).makePublic();
-
-    return `https://storage.googleapis.com/${this.bucketName}/${outputPath}`;
+    return await this.getSignedUrl(outputPath);
   }
 }

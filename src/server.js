@@ -455,7 +455,7 @@ app.post('/api/prepare-for-analysis', async (req, res) => {
     res.json({
       success: true,
       analysisPackageUrl,
-      screenshotsUrl: `https://storage.googleapis.com/${bucketName}/analysis/${targetScrapeId}/screenshots/`,
+      screenshotsPath: `analysis/${targetScrapeId}/screenshots/`,
       metadata: {
         originalScrapeId: targetScrapeId,
         originalUrl: analysisPackage.source.originalUrl,
