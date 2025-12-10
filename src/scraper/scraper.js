@@ -394,12 +394,113 @@ export class WebScraper {
     }
   }
 
+  /**
+   * Intelligent click detection using visual heuristics
+   * Catches React/Vue/Next.js elements that selector-based detection misses
+   */
+  async detectClickableElements(page) {
+    return await page.evaluate(() => {
+      const clickable = [];
+      const seen = new Set();
+      
+      // Get ALL elements on page
+      const allElements = document.querySelectorAll('*');
+      
+      allElements.forEach((el, index) => {
+        // Skip invisible/tiny elements
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 20 || rect.height < 20) return;
+        if (rect.top < 0 || rect.left < 0) return;
+        if (rect.top > window.innerHeight) return; // Below fold
+        
+        const style = window.getComputedStyle(el);
+        
+        // Skip hidden elements
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        if (style.opacity === '0') return;
+        
+        // DETECTION HEURISTICS
+        const isClickable = (
+          // 1. Cursor indicates clickable
+          style.cursor === 'pointer' ||
+          
+          // 2. Has click-related attributes
+          el.onclick !== null ||
+          el.hasAttribute('onclick') ||
+          el.hasAttribute('tabindex') ||
+          el.hasAttribute('role') ||
+          
+          // 3. Is a semantic interactive element
+          ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName) ||
+          
+          // 4. Has interactive ARIA role
+          ['button', 'link', 'tab', 'menuitem', 'option'].includes(el.getAttribute('role')) ||
+          
+          // 5. Has data attributes suggesting interactivity
+          Array.from(el.attributes).some(attr => 
+            attr.name.startsWith('data-') && 
+            (attr.name.includes('click') || attr.name.includes('toggle') || 
+             attr.name.includes('open') || attr.name.includes('modal') ||
+             attr.name.includes('action') || attr.name.includes('trigger'))
+          )
+        );
+        
+        if (!isClickable) return;
+        
+        // Get meaningful text
+        const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '')
+          .trim()
+          .slice(0, 50)
+          .replace(/\s+/g, ' ');
+        
+        // Skip if no text or duplicate text
+        if (!text || text.length < 2) return;
+        if (seen.has(text.toLowerCase())) return;
+        seen.add(text.toLowerCase());
+        
+        // Skip common non-interactive text
+        const skipTexts = ['loading', 'copyright', '©', 'all rights reserved'];
+        if (skipTexts.some(skip => text.toLowerCase().includes(skip))) return;
+        
+        // Generate a unique selector for this element
+        let selector = '';
+        if (el.id) {
+          selector = `#${el.id}`;
+        } else if (el.className && typeof el.className === 'string') {
+          const classes = el.className.split(' ').filter(c => c && !c.includes('--')).slice(0, 2);
+          if (classes.length) {
+            selector = `${el.tagName.toLowerCase()}.${classes.join('.')}`;
+          }
+        }
+        if (!selector) {
+          selector = `${el.tagName.toLowerCase()}:nth-child(${index})`;
+        }
+        
+        clickable.push({
+          selector,
+          text,
+          tag: el.tagName,
+          x: rect.x + rect.width / 2,
+          y: rect.y + rect.height / 2,
+          hasCursorPointer: style.cursor === 'pointer',
+          hasOnClick: el.onclick !== null || el.hasAttribute('onclick'),
+          index: clickable.length
+        });
+      });
+      
+      // Sort by position (top-left first) and limit
+      return clickable
+        .sort((a, b) => a.y - b.y || a.x - b.x)
+        .slice(0, 25); // Max 25 clickable elements
+    });
+  }
+
   async captureInteractiveScreenshots(page, url) {
     try {
       this.log(`Finding interactive elements on: ${url}`);
 
-      // Find all clickable elements that might reveal new content
-      const clickableElements = await page.evaluate(() => {
+      // Find all clickable elements that might reveal new content (selector-based)
+      const selectorBasedElements = await page.evaluate(() => {
         const elements = [];
         const seen = new Set();
 
@@ -464,7 +565,8 @@ export class WebScraper {
                 href: el.getAttribute('href') || null,
                 x: rect.x + rect.width / 2,
                 y: rect.y + rect.height / 2,
-                index: elements.length
+                index: elements.length,
+                source: 'selector'
               });
             }
           } catch (e) {
@@ -475,7 +577,33 @@ export class WebScraper {
         return elements.slice(0, 20); // Limit to 20 interactive elements
       });
 
-      this.log(`Found ${clickableElements.length} interactive elements`);
+      this.log(`Selector-based detection found ${selectorBasedElements.length} elements`);
+
+      // Smart detection: Find elements with cursor:pointer or click handlers
+      // This catches React/Vue components that don't use standard selectors
+      const smartClickables = await this.detectClickableElements(page);
+      this.log(`Smart detection found ${smartClickables.length} additional clickable elements`);
+
+      // Merge with existing, avoiding duplicates
+      const existingTexts = new Set(selectorBasedElements.map(el => el.text?.toLowerCase()));
+      const clickableElements = [...selectorBasedElements];
+      
+      for (const smart of smartClickables) {
+        if (!existingTexts.has(smart.text.toLowerCase())) {
+          clickableElements.push({
+            tag: smart.tag,
+            text: smart.text,
+            selector: smart.selector,
+            x: smart.x,
+            y: smart.y,
+            index: clickableElements.length,
+            source: 'smart-detection'
+          });
+          existingTexts.add(smart.text.toLowerCase());
+        }
+      }
+
+      this.log(`Total interactive elements after merge: ${clickableElements.length}`);
 
       // Track which states we've already captured
       const capturedStates = new Set();
