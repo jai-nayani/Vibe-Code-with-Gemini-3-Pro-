@@ -154,35 +154,40 @@ export class FileManager {
     return `${dir}/${uniqueFilename}`;
   }
 
-  urlToScreenshotFilename(url) {
+  urlToScreenshotFilename(url, state = null) {
     try {
       const parsed = new URL(url);
       let pathname = parsed.pathname;
 
       // Handle root path
       if (pathname === '/' || pathname === '') {
-        return 'screenshot_index.png';
+        pathname = 'index';
+      } else {
+        // Remove leading/trailing slashes and convert to filename
+        pathname = pathname.replace(/^\/+|\/+$/g, '').replace(/\//g, '_');
       }
 
-      // Remove leading/trailing slashes and convert to filename
-      pathname = pathname.replace(/^\/+|\/+$/g, '');
-
-      // Replace slashes with underscores
-      let filename = 'screenshot_' + pathname.replace(/\//g, '_');
-
-      // Add .png extension
-      filename += '.png';
+      // Build filename with state
+      let filename;
+      if (state && state !== 'initial') {
+        // Interactive state: screenshot_pagename_statename.png
+        filename = `screenshot_${pathname}_${state}.png`;
+      } else {
+        // Initial state: screenshot_pagename_initial.png
+        filename = `screenshot_${pathname}_initial.png`;
+      }
 
       return this.sanitizeFilename(filename);
     } catch {
-      return 'screenshot_' + this.generateHash(url) + '.png';
+      const stateStr = state ? `_${state}` : '_initial';
+      return 'screenshot_' + this.generateHash(url) + stateStr + '.png';
     }
   }
 
-  async saveScreenshot(url, screenshotBuffer) {
+  async saveScreenshot(url, screenshotBuffer, state = null) {
     const dir = 'images/web_screenshots';
     const fullDir = path.join(this.outputDir, dir);
-    const filename = this.urlToScreenshotFilename(url);
+    const filename = this.urlToScreenshotFilename(url, state);
     const uniqueFilename = await this.getUniqueFilename(fullDir, filename);
     const filePath = path.join(fullDir, uniqueFilename);
 
