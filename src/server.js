@@ -100,6 +100,7 @@ async function getNextRunNumber() {
 // Upload directory to Cloud Storage
 async function uploadDirectoryToBucket(localDir, bucketName, scrapeId) {
   const bucket = storage.bucket(bucketName);
+  console.log("Uploading scrape:", scrapeId);
   
   async function uploadRecursive(dirPath, bucketPrefix = '', scrapeId) {
     const entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -205,7 +206,7 @@ app.post('/api/start', async (req, res) => {
     
     // Upload scrape output to Cloud Storage
     try {
-      await uploadDirectoryToBucket(outputDir, bucketName, runNumber.toString());
+      await uploadDirectoryToBucket(outputDir, bucketName, scraper.scrapeId);
     } catch (error) {
       console.error('Error uploading to Cloud Storage:', error.message);
     }
