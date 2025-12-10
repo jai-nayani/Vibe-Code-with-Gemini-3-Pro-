@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { WebScraper } from './scraper/scraper.js';
 import { Storage } from '@google-cloud/storage';
+import { AnalysisCompressor } from './utils/analysisCompressor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -410,6 +411,88 @@ app.post('/api/scrape-for-llm', async (req, res) => {
 // Health check endpoint for AI Studio
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', service: 'website-scraper', timestamp: new Date().toISOString() });
+});
+
+// ===========================================
+// DATA COMPRESSION ENGINE - Prepare for AI Analysis
+// ===========================================
+app.post('/api/prepare-for-analysis', async (req, res) => {
+  const { scrapeId, useLatest } = req.body;
+
+  console.log(`[Analysis API] Request received: scrapeId=${scrapeId}, useLatest=${useLatest}`);
+
+  try {
+    const compressor = new AnalysisCompressor(storage, bucketName);
+    let targetScrapeId = scrapeId;
+
+    // Find latest scrape if needed
+    if (!targetScrapeId && useLatest) {
+      targetScrapeId = await compressor.findLatestScrape();
+    }
+
+    if (!targetScrapeId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Either scrapeId or useLatest:true is required'
+      });
+    }
+
+    console.log(`[Analysis API] Processing scrape: ${targetScrapeId}`);
+
+    // Compile the analysis package
+    const { analysisPackage, processingErrors } = await compressor.compileAnalysisPackage(targetScrapeId);
+
+    // Save to GCS
+    const analysisPackageUrl = await compressor.saveAnalysisPackage(targetScrapeId, analysisPackage);
+
+    // Calculate compression ratio
+    const originalSize = analysisPackage.source.pagesScraped * 500000; // Estimate ~500KB per page
+    const compressedSize = JSON.stringify(analysisPackage).length;
+    const compressionRatio = Math.round(originalSize / compressedSize);
+
+    console.log(`[Analysis API] Success: ${analysisPackageUrl}`);
+
+    res.json({
+      success: true,
+      analysisPackageUrl,
+      screenshotsUrl: `https://storage.googleapis.com/${bucketName}/analysis/${targetScrapeId}/screenshots/`,
+      metadata: {
+        originalScrapeId: targetScrapeId,
+        originalUrl: analysisPackage.source.originalUrl,
+        pagesProcessed: analysisPackage.content.pages.length,
+        screenshotsIncluded: analysisPackage.screenshots.length,
+        totalSizeBytes: compressedSize,
+        compressionRatio: `${compressionRatio}x`,
+        timestamp: new Date().toISOString()
+      },
+      processingErrors: processingErrors.length > 0 ? processingErrors : undefined
+    });
+
+  } catch (error) {
+    console.error(`[Analysis API] Error: ${error.message}`);
+
+    // Return appropriate error response
+    if (error.message.includes('No scrapes found')) {
+      return res.status(404).json({
+        success: false,
+        error: 'No scrapes found in bucket'
+      });
+    }
+
+    if (error.message.includes('missing') || error.message.includes('corrupt')) {
+      return res.status(404).json({
+        success: false,
+        error: error.message,
+        scrapeId: req.body.scrapeId
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to prepare analysis package',
+      details: error.message
+    });
+  }
 });
 
 // Start server
