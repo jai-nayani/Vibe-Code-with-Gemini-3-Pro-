@@ -98,10 +98,10 @@ async function getNextRunNumber() {
 }
 
 // Upload directory to Cloud Storage
-async function uploadDirectoryToBucket(localDir, bucketName) {
+async function uploadDirectoryToBucket(localDir, bucketName, scrapeId) {
   const bucket = storage.bucket(bucketName);
   
-  async function uploadRecursive(dirPath, bucketPrefix = '') {
+  async function uploadRecursive(dirPath, bucketPrefix = '', scrapeId) {
     const entries = await fs.readdir(dirPath, { withFileTypes: true });
     
     for (const entry of entries) {
@@ -109,11 +109,11 @@ async function uploadDirectoryToBucket(localDir, bucketName) {
       const bucketPath = path.join(bucketPrefix, entry.name).replace(/\\/g, '/');
       
       if (entry.isDirectory()) {
-        await uploadRecursive(fullPath, bucketPath);
+        await uploadRecursive(fullPath, bucketPath, scrapeId);
       } else {
         try {
           await bucket.upload(fullPath, {
-            destination: `scrapes/${path.basename(localDir)}/${bucketPath}`,
+            destination: `scrapes/${scrapeId}/${bucketPath}`,
           });
           console.log('Uploaded:', fullPath);
         } catch (error) {
@@ -124,7 +124,7 @@ async function uploadDirectoryToBucket(localDir, bucketName) {
   }
   
   try {
-    await uploadRecursive(localDir);
+    await uploadRecursive(localDir, '', scrapeId);
     console.log(`Successfully uploaded ${localDir} to ${bucketName}`);
   } catch (error) {
     console.error(`Error uploading directory ${localDir}:`, error.message);
@@ -205,7 +205,7 @@ app.post('/api/start', async (req, res) => {
     
     // Upload scrape output to Cloud Storage
     try {
-      await uploadDirectoryToBucket(outputDir, bucketName);
+      await uploadDirectoryToBucket(outputDir, bucketName, runNumber.toString());
     } catch (error) {
       console.error('Error uploading to Cloud Storage:', error.message);
     }
