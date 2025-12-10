@@ -30,3 +30,6 @@ steps:
 images:
   - "gcr.io/$PROJECT_ID/vibe-scraper:$SHORT_SHA"
 
+options:
+  logging: CLOUD_LOGGING_ONLY
+
