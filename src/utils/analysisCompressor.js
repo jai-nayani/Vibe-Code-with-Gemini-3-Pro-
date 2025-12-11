@@ -81,71 +81,146 @@ export class AnalysisCompressor {
     }
   }
 
-  // Select key screenshots (max 10)
+  // ============================================
+  // FIXED: Select key screenshots (handles SPAs properly)
+  // ============================================
   async selectKeyScreenshots(scrapeId, scrapeLog) {
     this.log('Selecting key screenshots...');
     const screenshots = scrapeLog.screenshots || [];
-    const selected = [];
-    const maxScreenshots = 10;
+    const successScreenshots = screenshots.filter(s => s.status === 'success');
+    
+    this.log(`Total screenshots: ${screenshots.length}, successful: ${successScreenshots.length}`);
 
-    // Priority 1: Homepage initial state
-    const homeInitial = screenshots.find(s =>
-      s.local_path?.includes('screenshot_index_initial') && s.status === 'success'
+    // Detect if this is a single-page app (only index pages)
+    const hasOnlyIndexPages = successScreenshots.every(s => 
+      s.local_path?.includes('screenshot_index_') || 
+      s.local_path?.includes('/index')
     );
-    if (homeInitial) {
-      selected.push({ ...homeInitial, priority: 'home-initial' });
-    }
+    
+    const isSinglePageApp = hasOnlyIndexPages || (scrapeLog.stats?.pages_scraped === 1);
+    this.log(`Single-page app detected: ${isSinglePageApp}`);
 
-    // Priority 2: Homepage interactive states (max 2)
-    const homeInteractive = screenshots.filter(s =>
-      s.local_path?.includes('screenshot_index_') &&
-      !s.local_path?.includes('_initial') &&
-      s.status === 'success'
-    ).slice(0, 2);
-    selected.push(...homeInteractive.map(s => ({ ...s, priority: 'home-interactive' })));
+    const selected = [];
+    const maxScreenshots = 15; // Increased from 10 to capture more states
 
-    // Priority 3: Other page initial states (max 4)
-    const otherInitials = screenshots.filter(s =>
-      !s.local_path?.includes('screenshot_index_') &&
-      s.local_path?.includes('_initial') &&
-      s.status === 'success'
-    ).slice(0, 4);
-    selected.push(...otherInitials.map(s => ({ ...s, priority: 'page-initial' })));
+    // ============================================
+    // STRATEGY FOR SINGLE-PAGE APPS (like portfolios)
+    // ============================================
+    if (isSinglePageApp) {
+      this.log('Using SPA selection strategy - capturing ALL unique states');
+      
+      // For SPAs, take ALL unique screenshots (up to max)
+      // Priority 1: Initial state
+      const initial = successScreenshots.find(s => 
+        s.local_path?.includes('_initial')
+      );
+      if (initial) {
+        selected.push({ ...initial, priority: 'initial' });
+        this.log(`Selected initial: ${initial.local_path}`);
+      }
 
-    // Priority 4: Other interactive states (fill remaining slots)
-    const remaining = maxScreenshots - selected.length;
-    if (remaining > 0) {
-      const otherInteractive = screenshots.filter(s =>
-        !s.local_path?.includes('screenshot_index_') &&
+      // Priority 2: ALL interactive states (these are the modals/sections)
+      const interactive = successScreenshots.filter(s => 
         !s.local_path?.includes('_initial') &&
-        s.status === 'success' &&
         !selected.some(sel => sel.local_path === s.local_path)
-      ).slice(0, remaining);
-      selected.push(...otherInteractive.map(s => ({ ...s, priority: 'page-interactive' })));
+      );
+
+      // Deduplicate by extracting meaningful names and removing near-duplicates
+      const seen = new Set();
+      for (const screenshot of interactive) {
+        // Extract the meaningful part of the filename
+        const filename = screenshot.local_path?.split('/').pop() || '';
+        const meaningfulPart = this.extractMeaningfulName(filename);
+        
+        // Skip if we've seen a very similar name
+        if (!seen.has(meaningfulPart) && selected.length < maxScreenshots) {
+          seen.add(meaningfulPart);
+          selected.push({ ...screenshot, priority: 'interactive', name: meaningfulPart });
+          this.log(`Selected interactive: ${filename} (${meaningfulPart})`);
+        }
+      }
+    } 
+    // ============================================
+    // STRATEGY FOR MULTI-PAGE SITES
+    // ============================================
+    else {
+      this.log('Using multi-page selection strategy');
+      
+      // Priority 1: Homepage initial state
+      const homeInitial = successScreenshots.find(s =>
+        s.local_path?.includes('screenshot_index_initial')
+      );
+      if (homeInitial) {
+        selected.push({ ...homeInitial, priority: 'home-initial' });
+      }
+
+      // Priority 2: Homepage interactive states (max 5 for multi-page)
+      const homeInteractive = successScreenshots.filter(s =>
+        s.local_path?.includes('screenshot_index_') &&
+        !s.local_path?.includes('_initial')
+      ).slice(0, 5);
+      selected.push(...homeInteractive.map(s => ({ ...s, priority: 'home-interactive' })));
+
+      // Priority 3: Other page initial states (max 5)
+      const otherInitials = successScreenshots.filter(s =>
+        !s.local_path?.includes('screenshot_index_') &&
+        s.local_path?.includes('_initial')
+      ).slice(0, 5);
+      selected.push(...otherInitials.map(s => ({ ...s, priority: 'page-initial' })));
+
+      // Priority 4: Other interactive states (fill remaining slots)
+      const remaining = maxScreenshots - selected.length;
+      if (remaining > 0) {
+        const otherInteractive = successScreenshots.filter(s =>
+          !s.local_path?.includes('screenshot_index_') &&
+          !s.local_path?.includes('_initial') &&
+          !selected.some(sel => sel.local_path === s.local_path)
+        ).slice(0, remaining);
+        selected.push(...otherInteractive.map(s => ({ ...s, priority: 'page-interactive' })));
+      }
     }
 
-    this.log(`Selected ${selected.length} screenshots`);
+    this.log(`Final selection: ${selected.length} screenshots`);
+    selected.forEach(s => this.log(`  - ${s.local_path} (${s.priority})`));
+    
     return selected.slice(0, maxScreenshots);
+  }
+
+  // Extract meaningful name from screenshot filename
+  extractMeaningfulName(filename) {
+    // Remove extension and common prefixes
+    let name = filename
+      .replace(/\.(png|jpg|jpeg)$/i, '')
+      .replace(/^screenshot_/, '')
+      .replace(/^index_/, '');
+    
+    // Take first 3 words to identify the state
+    const words = name.split('_').slice(0, 3).join('_');
+    return words.toLowerCase();
   }
 
   // Compress a screenshot
   async compressScreenshot(buffer) {
     const compressed = await sharp(buffer)
-      .resize(1024, null, { withoutEnlargement: true })
-      .jpeg({ quality: 75 })
+      .resize(1280, null, { withoutEnlargement: true }) // Increased from 1024 for better detail
+      .jpeg({ quality: 80 }) // Slightly higher quality
       .toBuffer();
     return compressed;
   }
 
-  // Extract text and structure from HTML
+  // ============================================
+  // IMPROVED: Extract text and structure from HTML
+  // ============================================
   extractTextFromHtml(htmlContent, pageUrl = '') {
     const $ = cheerio.load(htmlContent);
 
     // Remove scripts, styles, and comments
-    $('script, style, noscript, iframe').remove();
+    $('script, style, noscript, iframe, svg').remove();
 
     // Extract title
-    const title = $('title').text().trim();
+    const title = $('title').text().trim() || 
+                  $('h1').first().text().trim() ||
+                  $('meta[property="og:title"]').attr('content') || '';
 
     // Extract meta description
     const metaDescription = $('meta[name="description"]').attr('content') ||
@@ -154,59 +229,126 @@ export class AnalysisCompressor {
     // Extract keywords
     const keywords = $('meta[name="keywords"]').attr('content') || '';
 
-    // Extract headings (max 30)
+    // Extract ALL headings (increased limit)
     const headings = [];
-    $('h1, h2, h3').each((i, el) => {
-      if (headings.length < 30) {
-        const text = $(el).text().trim();
-        if (text && text.length < 200) {
-          headings.push(text);
+    $('h1, h2, h3, h4, h5, h6').each((i, el) => {
+      if (headings.length < 50) { // Increased from 30
+        const text = $(el).text().trim().replace(/\s+/g, ' ');
+        if (text && text.length > 1 && text.length < 300) {
+          headings.push({
+            level: el.tagName.toLowerCase(),
+            text: text
+          });
         }
       }
     });
 
-    // Extract navigation items (max 20)
+    // Extract navigation items (increased limit)
     const navigation = [];
-    const seen = new Set();
-    $('nav a, header a').each((i, el) => {
-      if (navigation.length < 20) {
-        const text = $(el).text().trim();
-        if (text && text.length < 50 && !seen.has(text.toLowerCase())) {
-          seen.add(text.toLowerCase());
+    const navSeen = new Set();
+    $('nav a, header a, .nav a, .navigation a, .menu a, [role="navigation"] a').each((i, el) => {
+      if (navigation.length < 30) { // Increased from 20
+        const text = $(el).text().trim().replace(/\s+/g, ' ');
+        if (text && text.length > 0 && text.length < 50 && !navSeen.has(text.toLowerCase())) {
+          navSeen.add(text.toLowerCase());
           navigation.push(text);
         }
       }
     });
 
-    // Extract body text (max 8000 chars)
+    // Extract paragraphs (new!)
+    const paragraphs = [];
+    $('p').each((i, el) => {
+      if (paragraphs.length < 30) {
+        const text = $(el).text().trim().replace(/\s+/g, ' ');
+        if (text && text.length > 30 && text.length < 1000) {
+          paragraphs.push(text);
+        }
+      }
+    });
+
+    // Extract body text (increased limit for SPAs)
     const bodyText = $('body').text()
       .replace(/\s+/g, ' ')
       .trim()
-      .substring(0, 8000);
+      .substring(0, 15000); // Increased from 8000
 
-    // Extract contact info
+    // Extract contact info with better patterns
     const pageText = $('body').text();
-    const phones = pageText.match(/(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/g) || [];
+    
+    // Phone patterns (more comprehensive)
+    const phonePatterns = [
+      /(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/g,
+      /(\+\d{1,3}[-.\s]?\d{2,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4})/g
+    ];
+    const phones = new Set();
+    for (const pattern of phonePatterns) {
+      const matches = pageText.match(pattern) || [];
+      matches.forEach(m => phones.add(m.trim()));
+    }
+
+    // Email pattern
     const emails = pageText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
 
-    // Extract CTAs
+    // Social links (new!)
+    const socialLinks = {};
+    $('a[href*="linkedin.com"]').each((i, el) => {
+      socialLinks.linkedin = $(el).attr('href');
+    });
+    $('a[href*="github.com"]').each((i, el) => {
+      socialLinks.github = $(el).attr('href');
+    });
+    $('a[href*="twitter.com"], a[href*="x.com"]').each((i, el) => {
+      socialLinks.twitter = $(el).attr('href');
+    });
+
+    // Extract CTAs (improved detection)
     const ctas = [];
-    $('button, a.btn, [role="button"], .cta, .button').each((i, el) => {
-      const text = $(el).text().trim();
-      if (text && text.length < 50 && !ctas.includes(text)) {
+    const ctaSeen = new Set();
+    $('button, a.btn, a.button, [role="button"], .cta, .btn, [class*="button"], [class*="cta"]').each((i, el) => {
+      const text = $(el).text().trim().replace(/\s+/g, ' ');
+      if (text && text.length > 1 && text.length < 50 && !ctaSeen.has(text.toLowerCase())) {
+        ctaSeen.add(text.toLowerCase());
         ctas.push(text);
       }
     });
 
-    // Identify sections
+    // Identify sections (improved detection)
     const sections = [];
+    const sectionKeywords = {
+      'hero': /hero|banner|jumbotron|landing|intro/i,
+      'about': /about|bio|story|who.*we|who.*i|profile/i,
+      'services': /service|offer|what.*we.*do|solution/i,
+      'experience': /experience|career|work.*history|employment/i,
+      'education': /education|school|degree|university|academic/i,
+      'skills': /skill|technolog|expertise|competenc|stack/i,
+      'projects': /project|portfolio|work|case.*stud/i,
+      'testimonials': /testimonial|review|feedback|client.*say/i,
+      'contact': /contact|reach|get.*in.*touch|connect/i,
+      'footer': /footer/i
+    };
+
     const bodyLower = bodyText.toLowerCase();
-    if (bodyLower.includes('hero') || $('section').first().find('h1').length) sections.push('hero');
-    if (bodyLower.includes('about') || bodyLower.includes('who we are')) sections.push('about');
-    if (bodyLower.includes('service') || bodyLower.includes('what we do')) sections.push('services');
-    if (bodyLower.includes('testimonial') || bodyLower.includes('review')) sections.push('testimonials');
-    if (bodyLower.includes('contact') || bodyLower.includes('get in touch')) sections.push('contact');
-    if ($('footer').length) sections.push('footer');
+    for (const [section, pattern] of Object.entries(sectionKeywords)) {
+      if (pattern.test(bodyLower) || $(`#${section}, .${section}, [data-section="${section}"]`).length > 0) {
+        sections.push(section);
+      }
+    }
+
+    // Also check section elements
+    $('section, [class*="section"]').each((i, el) => {
+      const id = $(el).attr('id') || '';
+      const classes = $(el).attr('class') || '';
+      const text = $(el).text().substring(0, 200).toLowerCase();
+      
+      for (const [section, pattern] of Object.entries(sectionKeywords)) {
+        if (pattern.test(id) || pattern.test(classes) || pattern.test(text)) {
+          if (!sections.includes(section)) {
+            sections.push(section);
+          }
+        }
+      }
+    });
 
     // Word count
     const wordCount = bodyText.split(/\s+/).filter(w => w.length > 0).length;
@@ -215,15 +357,18 @@ export class AnalysisCompressor {
       title,
       metaDescription,
       keywords,
-      headings: [...new Set(headings)],
+      headings: headings.map(h => typeof h === 'object' ? h.text : h), // Flatten for compatibility
+      headingsWithLevels: headings, // Keep structured version
       navigation: [...new Set(navigation)],
+      paragraphs: paragraphs.slice(0, 20),
       bodyText,
       contactInfo: {
-        phones: [...new Set(phones)].slice(0, 5),
-        emails: [...new Set(emails)].slice(0, 5)
+        phones: [...phones].slice(0, 5),
+        emails: [...new Set(emails)].slice(0, 5),
+        socialLinks
       },
-      ctas: ctas.slice(0, 10),
-      sections,
+      ctas: ctas.slice(0, 15),
+      sections: [...new Set(sections)],
       wordCount
     };
   }
@@ -237,17 +382,29 @@ export class AnalysisCompressor {
     const shadows = [];
     const spacing = [];
 
-    // Extract colors (hex, rgb, rgba)
+    // Extract colors (hex, rgb, rgba, hsl)
     const colorMatches = cssContent.match(/#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)/g) || [];
     for (const color of colorMatches) {
       colors[color] = (colors[color] || 0) + 1;
+    }
+
+    // Extract CSS custom properties (variables)
+    const cssVarMatches = cssContent.match(/--[\w-]+:\s*[^;]+/g) || [];
+    for (const match of cssVarMatches) {
+      const [name, value] = match.split(':').map(s => s.trim());
+      if (/color|bg|background|primary|secondary|accent/i.test(name)) {
+        const colorValue = value.replace(/['"]/g, '');
+        if (colorValue.match(/#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)/)) {
+          colors[colorValue] = (colors[colorValue] || 0) + 5; // Boost CSS vars
+        }
+      }
     }
 
     // Extract font families
     const fontMatches = cssContent.match(/font-family:\s*([^;]+)/g) || [];
     for (const match of fontMatches) {
       const font = match.replace('font-family:', '').trim().split(',')[0].replace(/["']/g, '').trim();
-      if (font && !font.includes('inherit') && !font.includes('sans-serif') && !font.includes('serif')) {
+      if (font && !font.includes('inherit') && font !== 'sans-serif' && font !== 'serif' && font !== 'monospace') {
         fonts.add(font);
       }
     }
@@ -291,7 +448,7 @@ export class AnalysisCompressor {
     // Sort colors by frequency
     const sortedColors = Object.entries(colors)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 15)
+      .slice(0, 20)
       .map(([color]) => color);
 
     return {
@@ -300,7 +457,7 @@ export class AnalysisCompressor {
         primary: sortedColors[0] || '#000000',
         secondary: sortedColors[1] || '#333333',
         accent: sortedColors.find(c => c.includes('rgb') && c.includes('255')) || sortedColors[2] || '#0066cc',
-        background: sortedColors.find(c => c === '#ffffff' || c === '#fff') || '#ffffff',
+        background: sortedColors.find(c => c === '#ffffff' || c === '#fff' || c.includes('255, 255, 255')) || '#ffffff',
         text: sortedColors.find(c => c.includes('#1') || c.includes('#2') || c.includes('#3')) || '#333333'
       },
       typography: {
@@ -342,7 +499,8 @@ export class AnalysisCompressor {
       hasForms: false,
       hasVideo: false,
       hasMap: false,
-      hasSocialLinks: false
+      hasSocialLinks: false,
+      isSinglePage: pageCount === 1
     };
 
     // Analyze pages
@@ -351,12 +509,13 @@ export class AnalysisCompressor {
       const textLower = (page.bodyText || '').toLowerCase();
 
       // Detect page types
-      if (pathLower === '/' || pathLower === '/index') pageTypes.push('home');
-      else if (pathLower.includes('about')) pageTypes.push('about');
-      else if (pathLower.includes('service')) pageTypes.push('services');
-      else if (pathLower.includes('contact')) pageTypes.push('contact');
-      else if (pathLower.includes('blog') || pathLower.includes('news')) pageTypes.push('blog');
-      else if (pathLower.includes('product') || pathLower.includes('shop')) pageTypes.push('products');
+      if (pathLower === '/' || pathLower === '/index' || pathLower.includes('index.html')) pageTypes.push('home');
+      if (pathLower.includes('about') || textLower.includes('about me') || textLower.includes('about us')) pageTypes.push('about');
+      if (pathLower.includes('service') || textLower.includes('our services')) pageTypes.push('services');
+      if (pathLower.includes('contact') || textLower.includes('contact us') || textLower.includes('get in touch')) pageTypes.push('contact');
+      if (pathLower.includes('blog') || pathLower.includes('news') || textLower.includes('latest posts')) pageTypes.push('blog');
+      if (pathLower.includes('product') || pathLower.includes('shop') || textLower.includes('add to cart')) pageTypes.push('products');
+      if (pathLower.includes('portfolio') || textLower.includes('my work') || textLower.includes('my projects')) pageTypes.push('portfolio');
 
       // Build hierarchy
       if (page.navigation) {
@@ -368,14 +527,25 @@ export class AnalysisCompressor {
       }
 
       // Detect features
-      if (textLower.includes('menu') || textLower.includes('hamburger')) features.hasMobileNav = true;
+      if (textLower.includes('menu') || textLower.includes('hamburger') || textLower.includes('☰')) features.hasMobileNav = true;
       if (textLower.includes('search')) features.hasSearch = true;
-      if (textLower.includes('blog') || textLower.includes('article')) features.hasBlog = true;
-      if (textLower.includes('cart') || textLower.includes('shop') || textLower.includes('buy')) features.hasEcommerce = true;
-      if (textLower.includes('form') || textLower.includes('submit') || textLower.includes('contact us')) features.hasForms = true;
-      if (textLower.includes('video') || textLower.includes('youtube') || textLower.includes('vimeo')) features.hasVideo = true;
-      if (textLower.includes('map') || textLower.includes('location') || textLower.includes('directions')) features.hasMap = true;
-      if (textLower.includes('facebook') || textLower.includes('twitter') || textLower.includes('instagram') || textLower.includes('linkedin')) features.hasSocialLinks = true;
+      if (textLower.includes('blog') || textLower.includes('article') || textLower.includes('posted on')) features.hasBlog = true;
+      if (textLower.includes('cart') || textLower.includes('shop') || textLower.includes('buy now') || textLower.includes('add to cart')) features.hasEcommerce = true;
+      if (textLower.includes('form') || textLower.includes('submit') || textLower.includes('send message')) features.hasForms = true;
+      if (textLower.includes('video') || textLower.includes('youtube') || textLower.includes('vimeo') || textLower.includes('watch')) features.hasVideo = true;
+      if (textLower.includes('map') || textLower.includes('location') || textLower.includes('directions') || textLower.includes('find us')) features.hasMap = true;
+      if (textLower.includes('facebook') || textLower.includes('twitter') || textLower.includes('instagram') || textLower.includes('linkedin') || textLower.includes('github')) features.hasSocialLinks = true;
+
+      // For single-page sites, detect sections
+      if (features.isSinglePage) {
+        if (page.sections) {
+          for (const section of page.sections) {
+            if (!pageTypes.includes(section)) {
+              pageTypes.push(section);
+            }
+          }
+        }
+      }
     }
 
     // Detect components from screenshots
@@ -389,6 +559,11 @@ export class AnalysisCompressor {
         components.push({ type: 'contact-form', variant: 'standard', count: 1 });
       }
       components.push({ type: 'footer', variant: 'standard', count: 1 });
+      
+      // For portfolios, add card components
+      if (pageTypes.includes('portfolio') || pageTypes.includes('projects')) {
+        components.push({ type: 'project-card', variant: 'grid', count: screenshotCount - 1 });
+      }
     }
 
     return {
@@ -396,7 +571,8 @@ export class AnalysisCompressor {
       pageTypes: [...new Set(pageTypes)],
       hierarchy,
       components,
-      features
+      features,
+      isSinglePage: features.isSinglePage
     };
   }
 
@@ -408,7 +584,7 @@ export class AnalysisCompressor {
     // Load scrape log
     const scrapeLog = await this.loadScrapeLog(scrapeId);
 
-    // Select and compress screenshots
+    // Select and compress screenshots (FIXED for SPAs)
     const selectedScreenshots = await this.selectKeyScreenshots(scrapeId, scrapeLog);
     const compressedScreenshots = [];
 
@@ -436,18 +612,22 @@ export class AnalysisCompressor {
         // Get signed URL for the screenshot
         const screenshotUrl = await this.getSignedUrl(outputPath);
 
+        // Extract meaningful name for Gemini
+        const meaningfulName = this.extractMeaningfulDisplayName(filename);
+
         compressedScreenshots.push({
           id: filename.replace('.jpg', ''),
+          name: meaningfulName, // Human-readable name
           page: screenshot.local_path.includes('index') ? 'index' :
                 screenshot.local_path.match(/screenshot_([^_]+)_/)?.[1] || 'unknown',
-          state: screenshot.type || 'initial',
+          state: screenshot.priority || 'interactive',
           filename,
           url: screenshotUrl,
           dimensions: `${metadata.width}x${metadata.height}`,
           sizeBytes: compressed.length
         });
 
-        this.log(`Compressed: ${filename} (${Math.round(compressed.length / 1024)}KB)`);
+        this.log(`Compressed: ${filename} → ${meaningfulName} (${Math.round(compressed.length / 1024)}KB)`);
       } catch (error) {
         this.log(`Error processing screenshot: ${error.message}`);
         processingErrors.push({ type: 'screenshot', path: screenshot.local_path, error: error.message });
@@ -460,6 +640,9 @@ export class AnalysisCompressor {
     const allCtas = new Set();
     const allPhones = new Set();
     const allEmails = new Set();
+    const allSocialLinks = {};
+    const allSections = new Set();
+    const allParagraphs = [];
     let siteTitle = '';
     let siteDescription = '';
 
@@ -484,12 +667,21 @@ export class AnalysisCompressor {
         extracted.ctas.forEach(c => allCtas.add(c));
         extracted.contactInfo.phones.forEach(p => allPhones.add(p));
         extracted.contactInfo.emails.forEach(e => allEmails.add(e));
+        extracted.sections.forEach(s => allSections.add(s));
+        allParagraphs.push(...extracted.paragraphs);
+        
+        // Merge social links
+        if (extracted.contactInfo.socialLinks) {
+          Object.assign(allSocialLinks, extracted.contactInfo.socialLinks);
+        }
 
         pages.push({
           path: new URL(pageInfo.url).pathname,
           title: extracted.title,
-          headings: extracted.headings.slice(0, 10),
-          bodyText: extracted.bodyText.substring(0, 3000),
+          headings: extracted.headings.slice(0, 15),
+          headingsWithLevels: extracted.headingsWithLevels?.slice(0, 15),
+          paragraphs: extracted.paragraphs.slice(0, 10),
+          bodyText: extracted.bodyText.substring(0, 5000),
           sections: extracted.sections,
           wordCount: extracted.wordCount
         });
@@ -512,7 +704,7 @@ export class AnalysisCompressor {
       const [cssFiles] = await this.bucket.getFiles({ prefix: `scrapes/${scrapeId}/assets/css/` });
       let allCss = '';
 
-      for (const cssFile of cssFiles.slice(0, 5)) {
+      for (const cssFile of cssFiles.slice(0, 10)) { // Increased from 5
         try {
           const [buffer] = await cssFile.download();
           allCss += buffer.toString() + '\n';
@@ -523,6 +715,7 @@ export class AnalysisCompressor {
 
       if (allCss) {
         design = this.extractDesignTokens(allCss);
+        this.log(`Extracted design tokens: ${design.colors.all.length} colors, ${design.typography.fonts.length} fonts`);
       }
     } catch (error) {
       this.log(`Error extracting design tokens: ${error.message}`);
@@ -534,24 +727,29 @@ export class AnalysisCompressor {
 
     // Compile final package
     const analysisPackage = {
-      version: '1.0',
+      version: '1.1', // Updated version
       generatedAt: new Date().toISOString(),
       source: {
         scrapeId,
         originalUrl: scrapeLog.target_url,
         scrapedAt: scrapeLog.started_at,
-        pagesScraped: scrapeLog.stats?.pages_scraped || pages.length
+        pagesScraped: scrapeLog.stats?.pages_scraped || pages.length,
+        screenshotsTotal: scrapeLog.screenshots?.length || 0,
+        screenshotsSelected: compressedScreenshots.length
       },
       screenshots: compressedScreenshots,
       content: {
         siteTitle,
         siteDescription,
         pages,
-        navigation: [...allNavigation].slice(0, 20),
-        callsToAction: [...allCtas].slice(0, 10),
+        paragraphs: [...new Set(allParagraphs)].slice(0, 20), // Deduplicated paragraphs
+        navigation: [...allNavigation].slice(0, 25),
+        callsToAction: [...allCtas].slice(0, 15),
+        sections: [...allSections],
         contactInfo: {
           phones: [...allPhones].slice(0, 5),
           emails: [...allEmails].slice(0, 5),
+          socialLinks: allSocialLinks,
           addresses: []
         }
       },
@@ -588,16 +786,65 @@ export class AnalysisCompressor {
       i.url?.toLowerCase().includes('logo')
     );
     if (logoImage) {
-      const logoPath = `scrapes/${scrapeId}/${logoImage.local_path}`;
-      const logoUrl = await this.getSignedUrl(logoPath);
-      analysisPackage.assets.logo = {
-        found: true,
-        url: logoUrl,
-        dimensions: null
-      };
+      try {
+        const logoPath = `scrapes/${scrapeId}/${logoImage.local_path}`;
+        const logoUrl = await this.getSignedUrl(logoPath);
+        analysisPackage.assets.logo = {
+          found: true,
+          url: logoUrl,
+          dimensions: null
+        };
+      } catch (e) {
+        this.log(`Could not get logo URL: ${e.message}`);
+      }
+    }
+
+    // Check for profile photo (common in portfolios)
+    const profileImage = scrapeLog.images?.find(i =>
+      i.local_path?.toLowerCase().includes('profile') ||
+      i.local_path?.toLowerCase().includes('avatar') ||
+      i.local_path?.toLowerCase().includes('headshot')
+    );
+    if (profileImage) {
+      try {
+        const profilePath = `scrapes/${scrapeId}/${profileImage.local_path}`;
+        const profileUrl = await this.getSignedUrl(profilePath);
+        analysisPackage.assets.profilePhoto = {
+          found: true,
+          url: profileUrl
+        };
+      } catch (e) {
+        // Ignore
+      }
     }
 
     return { analysisPackage, processingErrors };
+  }
+
+  // Extract human-readable display name from screenshot filename
+  extractMeaningfulDisplayName(filename) {
+    let name = filename
+      .replace(/\.(png|jpg|jpeg)$/i, '')
+      .replace(/^screenshot_/, '')
+      .replace(/^index_/, '');
+    
+    // Convert underscores to spaces and capitalize
+    name = name
+      .split('_')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ');
+
+    // Handle special cases
+    if (name.toLowerCase() === 'initial') {
+      return 'Homepage (Initial State)';
+    }
+
+    // Truncate very long names
+    if (name.length > 50) {
+      name = name.substring(0, 47) + '...';
+    }
+
+    return name || 'Screenshot';
   }
 
   // Save the analysis package to GCS
