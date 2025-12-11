@@ -395,328 +395,296 @@ export class WebScraper {
   }
 
   /**
-   * Intelligent click detection using visual heuristics
-   * Catches React/Vue/Next.js elements that selector-based detection misses
+   * Intelligent click detection that finds ALL clickable elements on page
+   * Including those below the fold - scrolls to discover everything
    */
   async detectClickableElements(page) {
-    return await page.evaluate(() => {
-      const clickable = [];
-      const seen = new Set();
+    // First, get the full page height
+    const pageHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+    const viewportHeight = await page.evaluate(() => window.innerHeight);
+    
+    const allClickables = [];
+    const seenTexts = new Set();
+    const seenPositions = new Set();
+    
+    // Scroll through the page to find all clickable elements
+    const scrollSteps = Math.ceil(pageHeight / viewportHeight);
+    
+    for (let step = 0; step <= scrollSteps; step++) {
+      const scrollY = step * viewportHeight * 0.8; // 80% scroll to overlap
       
-      // Get ALL elements on page
-      const allElements = document.querySelectorAll('*');
+      await page.evaluate((y) => window.scrollTo(0, y), scrollY);
+      await new Promise(r => setTimeout(r, 300)); // Wait for any lazy-loaded content
       
-      allElements.forEach((el, index) => {
-        // Skip invisible/tiny elements
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 20 || rect.height < 20) return;
-        if (rect.top < 0 || rect.left < 0) return;
-        if (rect.top > window.innerHeight) return; // Below fold
+      const elementsInView = await page.evaluate((currentScrollY) => {
+        const clickable = [];
+        const viewportHeight = window.innerHeight;
         
-        const style = window.getComputedStyle(el);
-        
-        // Skip hidden elements
-        if (style.display === 'none' || style.visibility === 'hidden') return;
-        if (style.opacity === '0') return;
-        
-        // DETECTION HEURISTICS
-        const isClickable = (
-          // 1. Cursor indicates clickable
-          style.cursor === 'pointer' ||
+        // Get all elements
+        document.querySelectorAll('*').forEach((el) => {
+          const rect = el.getBoundingClientRect();
           
-          // 2. Has click-related attributes
-          el.onclick !== null ||
-          el.hasAttribute('onclick') ||
-          el.hasAttribute('tabindex') ||
-          el.hasAttribute('role') ||
+          // Skip tiny/invisible elements
+          if (rect.width < 30 || rect.height < 30) return;
+          if (rect.top > viewportHeight || rect.bottom < 0) return; // Not in current view
           
-          // 3. Is a semantic interactive element
-          ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName) ||
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return;
+          if (parseFloat(style.opacity) < 0.1) return;
           
-          // 4. Has interactive ARIA role
-          ['button', 'link', 'tab', 'menuitem', 'option'].includes(el.getAttribute('role')) ||
+          // CHECK IF CLICKABLE
+          const isClickable = (
+            style.cursor === 'pointer' ||
+            el.onclick !== null ||
+            el.hasAttribute('onclick') ||
+            ['A', 'BUTTON'].includes(el.tagName) ||
+            ['button', 'link', 'tab', 'menuitem'].includes(el.getAttribute('role'))
+          );
           
-          // 5. Has data attributes suggesting interactivity
-          Array.from(el.attributes).some(attr => 
-            attr.name.startsWith('data-') && 
-            (attr.name.includes('click') || attr.name.includes('toggle') || 
-             attr.name.includes('open') || attr.name.includes('modal') ||
-             attr.name.includes('action') || attr.name.includes('trigger'))
-          )
-        );
-        
-        if (!isClickable) return;
-        
-        // Get meaningful text
-        const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '')
-          .trim()
-          .slice(0, 50)
-          .replace(/\s+/g, ' ');
-        
-        // Skip if no text or duplicate text
-        if (!text || text.length < 2) return;
-        if (seen.has(text.toLowerCase())) return;
-        seen.add(text.toLowerCase());
-        
-        // Skip common non-interactive text
-        const skipTexts = ['loading', 'copyright', '©', 'all rights reserved'];
-        if (skipTexts.some(skip => text.toLowerCase().includes(skip))) return;
-        
-        // Generate a unique selector for this element
-        let selector = '';
-        if (el.id) {
-          selector = `#${el.id}`;
-        } else if (el.className && typeof el.className === 'string') {
-          const classes = el.className.split(' ').filter(c => c && !c.includes('--')).slice(0, 2);
-          if (classes.length) {
-            selector = `${el.tagName.toLowerCase()}.${classes.join('.')}`;
+          if (!isClickable) return;
+          
+          // GET TEXT - prefer heading text within the element
+          let text = '';
+          const heading = el.querySelector('h1, h2, h3, h4, h5, h6');
+          if (heading) {
+            text = heading.innerText?.trim().slice(0, 40);
           }
-        }
-        if (!selector) {
-          selector = `${el.tagName.toLowerCase()}:nth-child(${index})`;
-        }
-        
-        clickable.push({
-          selector,
-          text,
-          tag: el.tagName,
-          x: rect.x + rect.width / 2,
-          y: rect.y + rect.height / 2,
-          hasCursorPointer: style.cursor === 'pointer',
-          hasOnClick: el.onclick !== null || el.hasAttribute('onclick'),
-          index: clickable.length
+          if (!text) {
+            text = (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 40);
+          }
+          if (!text || text.length < 2) return;
+          
+          // Skip generic/noisy text
+          const skipPatterns = ['loading', 'copyright', '©', 'all rights', 'cookie'];
+          if (skipPatterns.some(p => text.toLowerCase().includes(p))) return;
+          
+          // CHECK IF THIS IS A CONTAINER (card) - prefer containers over nested elements
+          const isContainer = (
+            el.classList.contains('card') ||
+            el.classList.contains('section') ||
+            el.getAttribute('role') === 'article' ||
+            el.tagName === 'ARTICLE' ||
+            el.tagName === 'SECTION' ||
+            (rect.width > 200 && rect.height > 100) // Large clickable area = likely a card
+          );
+          
+          // Calculate absolute position on page
+          const absoluteY = rect.top + currentScrollY;
+          
+          clickable.push({
+            text: text.replace(/\s+/g, ' '),
+            tagName: el.tagName,
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+            absoluteY: absoluteY,
+            width: rect.width,
+            height: rect.height,
+            isContainer: isContainer,
+            classes: el.className?.toString().slice(0, 100) || ''
+          });
         });
-      });
+        
+        return clickable;
+      }, scrollY);
       
-      // Sort by position (top-left first) and limit
-      return clickable
-        .sort((a, b) => a.y - b.y || a.x - b.x)
-        .slice(0, 25); // Max 25 clickable elements
-    });
+      // Add to collection, filtering duplicates
+      for (const elem of elementsInView) {
+        const textKey = elem.text.toLowerCase().slice(0, 20);
+        const posKey = `${Math.round(elem.absoluteY / 50)}`; // Group by ~50px bands
+        
+        // Skip if we've seen this text or very similar position
+        if (seenTexts.has(textKey)) continue;
+        
+        // Prefer containers (cards) over their children
+        const isDuplicatePosition = seenPositions.has(posKey);
+        if (isDuplicatePosition && !elem.isContainer) continue;
+        
+        seenTexts.add(textKey);
+        seenPositions.add(posKey);
+        allClickables.push(elem);
+      }
+    }
+    
+    // Scroll back to top
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 300));
+    
+    // Sort by position and prefer containers
+    return allClickables
+      .sort((a, b) => {
+        // Containers first at each Y level
+        if (Math.abs(a.absoluteY - b.absoluteY) < 100) {
+          return b.isContainer - a.isContainer;
+        }
+        return a.absoluteY - b.absoluteY;
+      })
+      .slice(0, 15); // Max 15 elements
   }
 
   async captureInteractiveScreenshots(page, url) {
     try {
       this.log(`Finding interactive elements on: ${url}`);
-
-      // Find all clickable elements that might reveal new content (selector-based)
-      const selectorBasedElements = await page.evaluate(() => {
-        const elements = [];
-        const seen = new Set();
-
-        // Selectors for interactive elements
-        const selectors = [
-          'nav a',
-          'nav button',
-          'header a',
-          'header button',
-          '[role="tab"]',
-          '[role="button"]',
-          '.nav-link',
-          '.tab',
-          '.tabs button',
-          '.tabs a',
-          '.menu-item',
-          '.menu a',
-          '.navbar a',
-          '.navbar button',
-          'button:not([type="submit"])',
-          '[data-toggle]',
-          '[data-bs-toggle]',
-          '.accordion-button',
-          '.collapse-toggle',
-          '[onclick]',
-          'a[href^="#"]',
-          'a[href=""]',
-          'a[href="javascript"]',
-          '.card[onclick]',
-          '.clickable'
-        ];
-
-        for (const selector of selectors) {
-          try {
-            const els = document.querySelectorAll(selector);
-            for (const el of els) {
-              // Skip if not visible
-              const rect = el.getBoundingClientRect();
-              if (rect.width === 0 || rect.height === 0) continue;
-
-              // Skip if already processed (by text content)
-              const text = (el.textContent || '').trim().substring(0, 50);
-              const identifier = `${el.tagName}-${text}-${Math.round(rect.x)}-${Math.round(rect.y)}`;
-              if (seen.has(identifier)) continue;
-              seen.add(identifier);
-
-              // Skip external links
-              if (el.tagName === 'A') {
-                const href = el.getAttribute('href') || '';
-                if (href.startsWith('http') && !href.includes(window.location.hostname)) continue;
-                if (href.startsWith('mailto:') || href.startsWith('tel:')) continue;
-              }
-
-              // Skip form submit buttons
-              if (el.type === 'submit') continue;
-
-              // Get element info
-              elements.push({
-                tag: el.tagName,
-                text: text || el.getAttribute('aria-label') || el.getAttribute('title') || 'element',
-                selector: selector,
-                href: el.getAttribute('href') || null,
-                x: rect.x + rect.width / 2,
-                y: rect.y + rect.height / 2,
-                index: elements.length,
-                source: 'selector'
-              });
-            }
-          } catch (e) {
-            // Ignore selector errors
-          }
-        }
-
-        return elements.slice(0, 20); // Limit to 20 interactive elements
-      });
-
-      this.log(`Selector-based detection found ${selectorBasedElements.length} elements`);
-
-      // Smart detection: Find elements with cursor:pointer or click handlers
-      // This catches React/Vue components that don't use standard selectors
-      const smartClickables = await this.detectClickableElements(page);
-      this.log(`Smart detection found ${smartClickables.length} additional clickable elements`);
-
-      // Merge with existing, avoiding duplicates
-      const existingTexts = new Set(selectorBasedElements.map(el => el.text?.toLowerCase()));
-      const clickableElements = [...selectorBasedElements];
       
-      for (const smart of smartClickables) {
-        if (!existingTexts.has(smart.text.toLowerCase())) {
-          clickableElements.push({
-            tag: smart.tag,
-            text: smart.text,
-            selector: smart.selector,
-            x: smart.x,
-            y: smart.y,
-            index: clickableElements.length,
-            source: 'smart-detection'
-          });
-          existingTexts.add(smart.text.toLowerCase());
-        }
+      // Use smart detection to find all clickable elements
+      const clickableElements = await this.detectClickableElements(page);
+      
+      this.log(`Found ${clickableElements.length} unique clickable elements:`);
+      clickableElements.forEach((el, i) => {
+        this.log(`  ${i + 1}. "${el.text}" (${el.tagName}, container: ${el.isContainer})`);
+      });
+      
+      if (clickableElements.length === 0) {
+        this.log('No interactive elements found');
+        return;
       }
-
-      this.log(`Total interactive elements after merge: ${clickableElements.length}`);
-
-      // Track which states we've already captured
+      
+      // Track captured states to avoid duplicates
       const capturedStates = new Set();
-
+      const capturedBuffers = [];
+      
       for (const element of clickableElements) {
         if (this.shouldStop) break;
-
+        
         try {
-          // Create a clean name for this state
-          const stateName = this.sanitizeStateName(element.text || `element_${element.index}`);
-
-          // Skip if we've already captured a similar state
-          if (capturedStates.has(stateName)) continue;
-          capturedStates.add(stateName);
-
-          this.log(`Clicking: "${element.text}" (${element.tag})`);
-
-          // Store current scroll position and URL
+          const stateName = this.sanitizeStateName(element.text);
+          
+          // Skip if we've already captured this state name
+          if (capturedStates.has(stateName)) {
+            this.log(`Skipping "${element.text}" - already captured`);
+            continue;
+          }
+          
+          this.log(`Clicking: "${element.text}" at (${Math.round(element.x)}, ${Math.round(element.y)})`);
+          
+          // Scroll element into view first
+          await page.evaluate((absY) => {
+            window.scrollTo(0, Math.max(0, absY - 200));
+          }, element.absoluteY);
+          await this.delay(300);
+          
+          // Recalculate position after scroll
+          const newPos = await page.evaluate((text) => {
+            const elements = Array.from(document.querySelectorAll('*'));
+            for (const el of elements) {
+              const elText = (el.innerText || '').trim().slice(0, 40);
+              if (elText.toLowerCase().includes(text.toLowerCase().slice(0, 15))) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 30 && rect.height > 30) {
+                  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+                }
+              }
+            }
+            return null;
+          }, element.text);
+          
+          if (!newPos) {
+            this.log(`Could not find element "${element.text}" after scroll, skipping`);
+            continue;
+          }
+          
+          // Store URL before click
           const beforeUrl = page.url();
-          const beforeScroll = await page.evaluate(() => window.scrollY);
-
+          
           // Click the element
-          await page.mouse.click(element.x, element.y);
-
-          // Wait for potential content changes
-          await this.delay(800); // Wait for animations
-
-          // Check if URL changed (navigation happened)
+          await page.mouse.click(newPos.x, newPos.y);
+          
+          // Wait for UI to update
+          await this.delay(800);
+          
+          // Check if page navigated
           const afterUrl = page.url();
           if (afterUrl !== beforeUrl && !afterUrl.includes('#')) {
-            // Page navigated - go back
             this.log(`Navigation detected, going back...`);
             await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
             await this.delay(500);
             continue;
           }
-
-          // Wait for any animations to complete
-          await page.evaluate(() => {
-            return new Promise(resolve => {
-              requestAnimationFrame(() => {
-                requestAnimationFrame(resolve);
-              });
-            });
-          });
-
-          // Check if content actually changed
-          const hasNewContent = await page.evaluate(() => {
-            // Look for newly visible elements
-            const visibleModals = document.querySelectorAll('.modal.show, .modal[style*="display: block"], [role="dialog"]:not([hidden])');
-            const visibleDropdowns = document.querySelectorAll('.dropdown-menu.show, .dropdown.open, [aria-expanded="true"]');
-            const activeTabs = document.querySelectorAll('.tab-pane.active, .tab-content.active, [role="tabpanel"]:not([hidden])');
-            const expandedAccordions = document.querySelectorAll('.accordion-collapse.show, .collapse.show');
-
-            return visibleModals.length > 0 ||
-                   visibleDropdowns.length > 0 ||
-                   activeTabs.length > 0 ||
-                   expandedAccordions.length > 0 ||
-                   document.querySelector('.active, .selected, .open, .expanded, .show');
-          });
-
-          // Capture screenshot of this state
+          
+          // Capture screenshot
           const screenshotBuffer = await page.screenshot({
             fullPage: true,
             type: 'png'
           });
-
-          // Save with state name
+          
+          // Check for visual duplicates
+          let isDuplicate = false;
+          for (const prev of capturedBuffers) {
+            const similarity = this.compareBuffers(screenshotBuffer, prev.buffer);
+            if (similarity > 0.95) {
+              this.log(`Skipping "${element.text}" - visually similar to "${prev.name}" (${Math.round(similarity * 100)}%)`);
+              isDuplicate = true;
+              break;
+            }
+          }
+          
+          if (isDuplicate) {
+            // Close any modal and continue
+            await page.keyboard.press('Escape');
+            await this.delay(300);
+            continue;
+          }
+          
+          // Save screenshot
           const localPath = await this.fileManager.saveScreenshot(url, screenshotBuffer, stateName);
           this.stats.screenshotsCaptured++;
           this.stats.totalSizeBytes += screenshotBuffer.length;
-
+          
+          capturedStates.add(stateName);
+          capturedBuffers.push({ buffer: screenshotBuffer, name: stateName });
+          
           this.screenshotLog.push({
             url,
             local_path: localPath,
             type: 'interactive',
-            trigger: {
-              element: element.tag,
-              text: element.text,
-              action: 'click'
-            },
+            trigger: { element: element.tagName, text: element.text, action: 'click' },
             size_bytes: screenshotBuffer.length,
             status: 'success',
             timestamp: new Date().toISOString()
           });
-
-          this.log(`Saved interactive screenshot: ${localPath} (${Math.round(screenshotBuffer.length / 1024)}KB)`);
+          
+          this.log(`Saved: ${localPath} (${Math.round(screenshotBuffer.length / 1024)}KB)`);
           this.emitProgress();
-
-          // Try to reset the state (close modals, reset tabs, etc.)
-          await page.evaluate(() => {
-            // Press Escape to close any modals/dropdowns
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-
-            // Click outside to close dropdowns
-            document.body.click();
-          });
-
+          
+          // Close modal/reset state
+          await page.keyboard.press('Escape');
           await this.delay(300);
-
-          // Restore scroll position
-          await page.evaluate((scrollY) => window.scrollTo(0, scrollY), beforeScroll);
-
+          
+          // Click outside to ensure modal is closed
+          await page.mouse.click(10, 10);
+          await this.delay(200);
+          
         } catch (error) {
-          this.log(`Interactive screenshot error for "${element.text}": ${error.message}`, 'error');
+          this.log(`Error capturing "${element.text}": ${error.message}`, 'error');
         }
       }
-
-      this.log(`Captured ${capturedStates.size} interactive states`);
-
+      
+      // Scroll back to top
+      await page.evaluate(() => window.scrollTo(0, 0));
+      
+      this.log(`Captured ${capturedStates.size} unique interactive states`);
+      
     } catch (error) {
-      this.log(`Error capturing interactive screenshots: ${error.message}`, 'error');
+      this.log(`Error in interactive screenshots: ${error.message}`, 'error');
     }
+  }
+
+  /**
+   * Simple buffer comparison for duplicate detection
+   */
+  compareBuffers(buf1, buf2) {
+    if (!buf1 || !buf2) return 0;
+    if (Math.abs(buf1.length - buf2.length) > buf1.length * 0.1) return 0; // Size differs >10%
+    
+    let matches = 0;
+    const samples = 1000;
+    const step = Math.floor(Math.min(buf1.length, buf2.length) / samples);
+    
+    for (let i = 0; i < samples; i++) {
+      const idx = i * step;
+      if (buf1[idx] === buf2[idx]) matches++;
+    }
+    
+    return matches / samples;
   }
 
   sanitizeStateName(text) {
