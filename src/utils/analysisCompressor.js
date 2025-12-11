@@ -13,11 +13,16 @@ export class AnalysisCompressor {
   }
 
   async getSignedUrl(filePath) {
-    const [url] = await this.bucket.file(filePath).getSignedUrl({
-      action: 'read',
-      expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-    });
-    return url;
+    try {
+      const [url] = await this.bucket.file(filePath).getSignedUrl({
+        action: 'read',
+        expires: Date.now() + 7 * 24 * 60 * 60 * 1000
+      });
+      return url;
+    } catch (e) {
+      this.log(`Error getting signed URL for ${filePath}: ${e.message}`);
+      return null;
+    }
   }
 
   async findLatestScrape() {
@@ -67,7 +72,7 @@ export class AnalysisCompressor {
     try {
       const [buffer] = await logFile.download();
       const scrapeLog = JSON.parse(buffer.toString());
-      this.log(`Loaded scrape log: ${scrapeLog.stats?.pages_scraped || 0} pages`);
+      this.log(`Loaded scrape log: ${scrapeLog.stats?.pages_scraped || 0} pages, ${scrapeLog.screenshots?.length || 0} screenshots`);
       return scrapeLog;
     } catch (error) {
       throw new Error(`Invalid scrape data: missing or corrupt scrape_log.json - ${error.message}`);
@@ -367,9 +372,12 @@ export class AnalysisCompressor {
   }
 
   async compileAnalysisPackage(scrapeId) {
-    this.log(`Compiling analysis package for ${scrapeId}...`);
+    this.log(`=== COMPILING ANALYSIS PACKAGE FOR ${scrapeId} ===`);
     const processingErrors = [];
     const scrapeLog = await this.loadScrapeLog(scrapeId);
+
+    // STEP 1: PROCESS SCREENSHOTS
+    this.log('STEP 1: Processing screenshots...');
     const selectedScreenshots = await this.selectKeyScreenshots(scrapeId, scrapeLog);
     const compressedScreenshots = [];
 
@@ -389,12 +397,16 @@ export class AnalysisCompressor {
           state: screenshot.priority || 'interactive', filename, url: screenshotUrl,
           dimensions: `${metadata.width}x${metadata.height}`, sizeBytes: compressed.length
         });
-        this.log(`Compressed: ${filename} (${Math.round(compressed.length / 1024)}KB)`);
+        this.log(`  ✓ ${filename}`);
       } catch (error) {
+        this.log(`  ✗ Error: ${error.message}`);
         processingErrors.push({ type: 'screenshot', path: screenshot.local_path, error: error.message });
       }
     }
+    this.log(`STEP 1 COMPLETE: ${compressedScreenshots.length} screenshots`);
 
+    // STEP 2: EXTRACT TEXT FROM HTML
+    this.log('STEP 2: Extracting text from HTML pages...');
     const pages = [];
     const allNavigation = new Set(), allCtas = new Set(), allPhones = new Set(), allEmails = new Set();
     const allSocialLinks = {}, allSections = new Set();
@@ -426,11 +438,16 @@ export class AnalysisCompressor {
           paragraphs: extracted.paragraphs.slice(0, 15), listItems: extracted.listItems.slice(0, 30),
           bodyText: extracted.bodyText.substring(0, 8000), sections: extracted.sections, wordCount: extracted.wordCount
         });
+        this.log(`  ✓ ${pageInfo.local_path} (${extracted.wordCount} words)`);
       } catch (error) {
+        this.log(`  ✗ Error: ${error.message}`);
         processingErrors.push({ type: 'page', path: pageInfo.local_path, error: error.message });
       }
     }
+    this.log(`STEP 2 COMPLETE: ${pages.length} pages`);
 
+    // STEP 3: EXTRACT DESIGN TOKENS
+    this.log('STEP 3: Extracting design tokens...');
     let design = { colors: { all: [], primary: '#000', secondary: '#333', accent: '#06c', background: '#fff', text: '#333' }, typography: { fonts: [], headingFont: 'sans-serif', bodyFont: 'sans-serif', sizes: {} }, spacing: { base: '8px', common: [] }, borderRadius: { common: [], buttons: '4px', cards: '8px' }, shadows: [] };
     try {
       const [cssFiles] = await this.bucket.getFiles({ prefix: `scrapes/${scrapeId}/assets/css/` });
@@ -438,14 +455,19 @@ export class AnalysisCompressor {
       for (const cssFile of cssFiles.slice(0, 10)) {
         try { const [buf] = await cssFile.download(); allCss += buf.toString() + '\n'; } catch (e) {}
       }
-      if (allCss) design = this.extractDesignTokens(allCss);
-    } catch (error) { processingErrors.push({ type: 'css', error: error.message }); }
+      if (allCss) {
+        design = this.extractDesignTokens(allCss);
+        this.log(`  ✓ ${design.colors.all.length} colors, ${design.typography.fonts.length} fonts`);
+      }
+    } catch (error) {
+      this.log(`  ✗ Error: ${error.message}`);
+      processingErrors.push({ type: 'css', error: error.message });
+    }
+    this.log('STEP 3 COMPLETE');
 
+    // STEP 4: BUILD CONTENT OBJECTS
+    this.log('STEP 4: Building content objects...');
     const structure = this.buildStructureMap(pages, scrapeLog);
-
-    // ============================================
-    // BUILD & SAVE TEXT CONTENT
-    // ============================================
     const textContent = {
       siteTitle, siteDescription,
       headings: this.deduplicateArray(allHeadings.map(h => h.text)).slice(0, 50),
@@ -458,36 +480,57 @@ export class AnalysisCompressor {
       sections: [...allSections],
       contactInfo: { phones: [...allPhones].slice(0, 5), emails: [...allEmails].slice(0, 5), socialLinks: allSocialLinks }
     };
+    this.log(`  ${textContent.headings.length} headings, ${textContent.paragraphs.length} paragraphs, ${textContent.listItems.length} list items`);
+    this.log('STEP 4 COMPLETE');
 
-    const textContentPath = `analysis/${scrapeId}/text_content.json`;
-    await this.bucket.file(textContentPath).save(JSON.stringify(textContent, null, 2), { contentType: 'application/json' });
-    this.log(`Saved: ${textContentPath}`);
+    // STEP 5: SAVE JSON FILES TO data/ FOLDER
+    this.log('STEP 5: Saving JSON files to data/ folder...');
+    const dataFolder = `analysis/${scrapeId}/data`;
 
-    // ============================================
-    // SAVE SITE STRUCTURE
-    // ============================================
-    const structurePath = `analysis/${scrapeId}/site_structure.json`;
-    await this.bucket.file(structurePath).save(JSON.stringify(structure, null, 2), { contentType: 'application/json' });
-    this.log(`Saved: ${structurePath}`);
+    try {
+      const textContentPath = `${dataFolder}/text_content.json`;
+      await this.bucket.file(textContentPath).save(JSON.stringify(textContent, null, 2), { contentType: 'application/json' });
+      this.log(`  ✓ ${textContentPath}`);
+    } catch (error) {
+      this.log(`  ✗ text_content.json: ${error.message}`);
+      processingErrors.push({ type: 'save', file: 'text_content.json', error: error.message });
+    }
 
-    // ============================================
-    // SAVE DESIGN TOKENS
-    // ============================================
-    const designPath = `analysis/${scrapeId}/design_tokens.json`;
-    await this.bucket.file(designPath).save(JSON.stringify(design, null, 2), { contentType: 'application/json' });
-    this.log(`Saved: ${designPath}`);
+    try {
+      const structurePath = `${dataFolder}/site_structure.json`;
+      await this.bucket.file(structurePath).save(JSON.stringify(structure, null, 2), { contentType: 'application/json' });
+      this.log(`  ✓ ${structurePath}`);
+    } catch (error) {
+      this.log(`  ✗ site_structure.json: ${error.message}`);
+      processingErrors.push({ type: 'save', file: 'site_structure.json', error: error.message });
+    }
 
-    // ============================================
-    // SAVE PAGES CONTENT (FULL TEXT FOR EACH PAGE)
-    // ============================================
-    const pagesPath = `analysis/${scrapeId}/pages_content.json`;
-    await this.bucket.file(pagesPath).save(JSON.stringify(pages, null, 2), { contentType: 'application/json' });
-    this.log(`Saved: ${pagesPath}`);
+    try {
+      const designPath = `${dataFolder}/design_tokens.json`;
+      await this.bucket.file(designPath).save(JSON.stringify(design, null, 2), { contentType: 'application/json' });
+      this.log(`  ✓ ${designPath}`);
+    } catch (error) {
+      this.log(`  ✗ design_tokens.json: ${error.message}`);
+      processingErrors.push({ type: 'save', file: 'design_tokens.json', error: error.message });
+    }
 
-    const textContentUrl = await this.getSignedUrl(textContentPath);
-    const structureUrl = await this.getSignedUrl(structurePath);
-    const designUrl = await this.getSignedUrl(designPath);
-    const pagesUrl = await this.getSignedUrl(pagesPath);
+    try {
+      const pagesPath = `${dataFolder}/pages_content.json`;
+      await this.bucket.file(pagesPath).save(JSON.stringify(pages, null, 2), { contentType: 'application/json' });
+      this.log(`  ✓ ${pagesPath}`);
+    } catch (error) {
+      this.log(`  ✗ pages_content.json: ${error.message}`);
+      processingErrors.push({ type: 'save', file: 'pages_content.json', error: error.message });
+    }
+
+    this.log('STEP 5 COMPLETE');
+
+    // STEP 6: BUILD FINAL PACKAGE
+    this.log('STEP 6: Building final analysis package...');
+    const textContentUrl = await this.getSignedUrl(`${dataFolder}/text_content.json`);
+    const structureUrl = await this.getSignedUrl(`${dataFolder}/site_structure.json`);
+    const designUrl = await this.getSignedUrl(`${dataFolder}/design_tokens.json`);
+    const pagesUrl = await this.getSignedUrl(`${dataFolder}/pages_content.json`);
 
     const analysisPackage = {
       version: '1.2', generatedAt: new Date().toISOString(),
@@ -501,10 +544,19 @@ export class AnalysisCompressor {
     };
 
     const logoImage = scrapeLog.images?.find(i => i.local_path?.toLowerCase().includes('logo'));
-    if (logoImage) { try { analysisPackage.assets.logo = { found: true, url: await this.getSignedUrl(`scrapes/${scrapeId}/${logoImage.local_path}`) }; } catch (e) {} }
+    if (logoImage) {
+      const url = await this.getSignedUrl(`scrapes/${scrapeId}/${logoImage.local_path}`);
+      if (url) analysisPackage.assets.logo = { found: true, url };
+    }
 
     const profileImage = scrapeLog.images?.find(i => i.local_path?.toLowerCase().includes('profile') || i.local_path?.toLowerCase().includes('avatar'));
-    if (profileImage) { try { analysisPackage.assets.profilePhoto = { found: true, url: await this.getSignedUrl(`scrapes/${scrapeId}/${profileImage.local_path}`) }; } catch (e) {} }
+    if (profileImage) {
+      const url = await this.getSignedUrl(`scrapes/${scrapeId}/${profileImage.local_path}`);
+      if (url) analysisPackage.assets.profilePhoto = { found: true, url };
+    }
+
+    this.log('STEP 6 COMPLETE');
+    this.log(`=== ANALYSIS COMPLETE: ${compressedScreenshots.length} screenshots, ${textContent.headings.length} headings, ${textContent.paragraphs.length} paragraphs ===`);
 
     return { analysisPackage, processingErrors };
   }
