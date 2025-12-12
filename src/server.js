@@ -426,7 +426,6 @@ app.post('/api/prepare-for-analysis', async (req, res) => {
     const compressor = new AnalysisCompressor(storage, bucketName);
     let targetScrapeId = scrapeId;
 
-    // Find latest scrape if needed
     if (!targetScrapeId && useLatest) {
       targetScrapeId = await compressor.findLatestScrape();
     }
@@ -440,51 +439,54 @@ app.post('/api/prepare-for-analysis', async (req, res) => {
 
     console.log(`[Analysis API] Processing scrape: ${targetScrapeId}`);
 
-    // Compile the analysis package
-    const { analysisPackage, processingErrors } = await compressor.compileAnalysisPackage(targetScrapeId);
+    // Call compileAnalysisPackage and handle the result safely
+    const result = await compressor.compileAnalysisPackage(targetScrapeId);
+    
+    // Safely extract analysisPackage and processingErrors
+    const analysisPackage = result?.analysisPackage || result || {};
+    const processingErrors = result?.processingErrors || [];
 
-    // Save to GCS
+    // Save the analysis package
     const analysisPackageUrl = await compressor.saveAnalysisPackage(targetScrapeId, analysisPackage);
-
-    // Calculate compression ratio
-    const originalSize = analysisPackage.source.pagesScraped * 500000; // Estimate ~500KB per page
-    const compressedSize = JSON.stringify(analysisPackage).length;
-    const compressionRatio = Math.round(originalSize / compressedSize);
 
     console.log(`[Analysis API] Success: ${analysisPackageUrl}`);
 
+    // Build response with safe property access
     res.json({
       success: true,
       analysisPackageUrl,
+      scrapeId: targetScrapeId,
       screenshotsPath: `analysis/${targetScrapeId}/screenshots/`,
+      dataPath: `analysis/${targetScrapeId}/data/`,
       metadata: {
-        originalScrapeId: targetScrapeId,
-        originalUrl: analysisPackage.source.originalUrl,
-        pagesProcessed: analysisPackage.content.pages.length,
-        screenshotsIncluded: analysisPackage.screenshots.length,
-        totalSizeBytes: compressedSize,
-        compressionRatio: `${compressionRatio}x`,
-        timestamp: new Date().toISOString()
+        originalUrl: analysisPackage?.source?.originalUrl || 'unknown',
+        pagesProcessed: analysisPackage?.structure?.pageCount || 0,
+        screenshotsIncluded: Array.isArray(analysisPackage?.screenshots) ? analysisPackage.screenshots.length : 0,
+        headingsExtracted: Array.isArray(analysisPackage?.content?.headings) ? analysisPackage.content.headings.length : 0,
+        paragraphsExtracted: Array.isArray(analysisPackage?.content?.paragraphs) ? analysisPackage.content.paragraphs.length : 0,
+        sectionsFound: Array.isArray(analysisPackage?.content?.sections) ? analysisPackage.content.sections : [],
+        version: analysisPackage?.version || '1.4',
+        generatedAt: analysisPackage?.generatedAt || new Date().toISOString()
       },
       processingErrors: processingErrors.length > 0 ? processingErrors : undefined
     });
 
   } catch (error) {
     console.error(`[Analysis API] Error: ${error.message}`);
+    console.error(error.stack);
 
-    // Return appropriate error response
     if (error.message.includes('No scrapes found')) {
-      return res.status(404).json({
-        success: false,
-        error: 'No scrapes found in bucket'
+      return res.status(404).json({ 
+        success: false, 
+        error: 'No scrapes found in bucket' 
       });
     }
 
     if (error.message.includes('missing') || error.message.includes('corrupt')) {
-      return res.status(404).json({
-        success: false,
-        error: error.message,
-        scrapeId: req.body.scrapeId
+      return res.status(404).json({ 
+        success: false, 
+        error: error.message, 
+        scrapeId: req.body.scrapeId 
       });
     }
 
