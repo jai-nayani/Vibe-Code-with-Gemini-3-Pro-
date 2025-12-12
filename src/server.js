@@ -133,6 +133,7 @@ async function uploadDirectoryToBucket(localDir, bucketName, scrapeId) {
 }
 
 // Delete raw scrape folder from GCS (after successful analysis)
+// Note: Preserves firecrawl/ folder, only deletes playwright data
 async function deleteRawScrapeFolder(bucketName, scrapeId) {
   const bucket = storage.bucket(bucketName);
   const prefix = `scrapes/${scrapeId}/`;
@@ -146,12 +147,82 @@ async function deleteRawScrapeFolder(bucketName, scrapeId) {
       return;
     }
     
-    // Delete all files in parallel
-    await Promise.all(files.map(file => file.delete()));
-    console.log(`[Auto-Analysis] Successfully deleted ${files.length} files from ${prefix}`);
+    // Filter out firecrawl folder - keep it for LLM
+    const filesToDelete = files.filter(file => !file.name.includes('/firecrawl/'));
+    
+    if (filesToDelete.length === 0) {
+      console.log(`[Auto-Analysis] Only firecrawl data found, nothing to delete`);
+      return;
+    }
+    
+    // Delete all files in parallel (excluding firecrawl)
+    await Promise.all(filesToDelete.map(file => file.delete()));
+    console.log(`[Auto-Analysis] Successfully deleted ${filesToDelete.length} files from ${prefix} (preserved firecrawl data)`);
   } catch (error) {
     console.error(`[Auto-Analysis] Error deleting raw scrape folder: ${error.message}`);
     throw error;
+  }
+}
+
+// Call Firecrawl API to scrape URL
+async function scrapeWithFirecrawl(url, scrapeId) {
+  const firecrawlApiKey = process.env.FIRECRAWL_API_KEY;
+  
+  if (!firecrawlApiKey) {
+    console.log('[Firecrawl] API key not found, skipping Firecrawl scrape');
+    return null;
+  }
+  
+  try {
+    console.log(`[Firecrawl] Starting scrape for: ${url}`);
+    
+    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${firecrawlApiKey}`
+      },
+      body: JSON.stringify({
+        url: url,
+        formats: ['markdown', 'html'],
+        onlyMainContent: false,
+        includeTags: ['title', 'meta', 'h1', 'h2', 'h3', 'p', 'a', 'img']
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Firecrawl API error: ${response.status} - ${errorText}`);
+    }
+    
+    const data = await response.json();
+    console.log(`[Firecrawl] Scrape completed successfully`);
+    
+    return data;
+  } catch (error) {
+    console.error(`[Firecrawl] Error: ${error.message}`);
+    return null; // Don't fail the whole process if Firecrawl fails
+  }
+}
+
+// Save Firecrawl data to GCS
+async function saveFirecrawlDataToGCS(bucketName, scrapeId, firecrawlData) {
+  if (!firecrawlData) {
+    return;
+  }
+  
+  try {
+    const bucket = storage.bucket(bucketName);
+    const filePath = `scrapes/${scrapeId}/firecrawl/firecrawl_data.json`;
+    
+    await bucket.file(filePath).save(JSON.stringify(firecrawlData, null, 2), {
+      contentType: 'application/json',
+      metadata: { cacheControl: 'public, max-age=3600' }
+    });
+    
+    console.log(`[Firecrawl] Saved data to: ${filePath}`);
+  } catch (error) {
+    console.error(`[Firecrawl] Error saving to GCS: ${error.message}`);
   }
 }
 
@@ -294,6 +365,24 @@ app.post('/api/start', async (req, res) => {
     console.error('Scraper error:', error);
     broadcast('error', { message: error.message });
   });
+
+  // Start Firecrawl scrape in parallel (non-blocking)
+  scrapeWithFirecrawl(url, scraper.scrapeId)
+    .then(async (firecrawlData) => {
+      if (firecrawlData) {
+        // Save Firecrawl data to GCS
+        await saveFirecrawlDataToGCS(bucketName, scraper.scrapeId, firecrawlData);
+        console.log(`[Firecrawl] Data saved for scrape: ${scraper.scrapeId}`);
+        broadcast('firecrawl-complete', {
+          scrapeId: scraper.scrapeId,
+          success: true
+        });
+      }
+    })
+    .catch((error) => {
+      console.error('[Firecrawl] Error in parallel scrape:', error.message);
+      // Don't broadcast error - Firecrawl failure shouldn't affect main scraper
+    });
 
   res.json({
     message: 'Scraping started',
