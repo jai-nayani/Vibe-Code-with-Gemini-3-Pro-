@@ -132,6 +132,29 @@ async function uploadDirectoryToBucket(localDir, bucketName, scrapeId) {
   }
 }
 
+// Delete raw scrape folder from GCS (after successful analysis)
+async function deleteRawScrapeFolder(bucketName, scrapeId) {
+  const bucket = storage.bucket(bucketName);
+  const prefix = `scrapes/${scrapeId}/`;
+  
+  try {
+    console.log(`[Auto-Analysis] Deleting raw scrape folder: ${prefix}`);
+    const [files] = await bucket.getFiles({ prefix });
+    
+    if (files.length === 0) {
+      console.log(`[Auto-Analysis] No files found to delete in ${prefix}`);
+      return;
+    }
+    
+    // Delete all files in parallel
+    await Promise.all(files.map(file => file.delete()));
+    console.log(`[Auto-Analysis] Successfully deleted ${files.length} files from ${prefix}`);
+  } catch (error) {
+    console.error(`[Auto-Analysis] Error deleting raw scrape folder: ${error.message}`);
+    throw error;
+  }
+}
+
 // Root route - serve index.html
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
@@ -204,11 +227,65 @@ app.post('/api/start', async (req, res) => {
   scraper.onComplete = async (result) => {
     broadcast('complete', result);
     
-    // Upload scrape output to Cloud Storage
+    // Upload scrape output to Cloud Storage (as backup before analysis)
     try {
       await uploadDirectoryToBucket(outputDir, bucketName, scraper.scrapeId);
+      console.log(`[Auto-Analysis] Raw scrape data uploaded for ${scraper.scrapeId}`);
     } catch (error) {
-      console.error('Error uploading to Cloud Storage:', error.message);
+      console.error('[Auto-Analysis] Error uploading to Cloud Storage:', error.message);
+      broadcast('error', { message: `Failed to upload raw scrape data: ${error.message}` });
+      return; // Don't proceed with analysis if upload fails
+    }
+    
+    // Automatically trigger analysis
+    try {
+      console.log(`[Auto-Analysis] Starting automatic analysis for ${scraper.scrapeId}`);
+      const compressor = new AnalysisCompressor(storage, bucketName);
+      
+      // Compile analysis package
+      const analysisResult = await compressor.compileAnalysisPackage(scraper.scrapeId);
+      const analysisPackage = analysisResult?.analysisPackage || analysisResult || {};
+      const processingErrors = analysisResult?.processingErrors || [];
+      
+      // Save analysis package
+      const analysisPackageUrl = await compressor.saveAnalysisPackage(scraper.scrapeId, analysisPackage);
+      
+      console.log(`[Auto-Analysis] Analysis complete: ${analysisPackageUrl}`);
+      console.log(`[Auto-Analysis] Screenshots: ${Array.isArray(analysisPackage?.screenshots) ? analysisPackage.screenshots.length : 0}, Headings: ${Array.isArray(analysisPackage?.content?.headings) ? analysisPackage.content.headings.length : 0}`);
+      
+      // Delete raw scrape data only if analysis succeeded
+      try {
+        await deleteRawScrapeFolder(bucketName, scraper.scrapeId);
+        console.log(`[Auto-Analysis] Raw scrape data deleted successfully`);
+      } catch (deleteError) {
+        console.error(`[Auto-Analysis] Warning: Failed to delete raw scrape data: ${deleteError.message}`);
+        // Don't fail the whole process if deletion fails - raw data can be cleaned up later
+      }
+      
+      // Broadcast analysis completion
+      broadcast('analysis-complete', {
+        scrapeId: scraper.scrapeId,
+        analysisPackageUrl,
+        screenshotsPath: `analysis/${scraper.scrapeId}/screenshots/`,
+        dataPath: `analysis/${scraper.scrapeId}/data/`,
+        metadata: {
+          originalUrl: analysisPackage?.source?.originalUrl || 'unknown',
+          pagesProcessed: analysisPackage?.structure?.pageCount || 0,
+          screenshotsIncluded: Array.isArray(analysisPackage?.screenshots) ? analysisPackage.screenshots.length : 0,
+          headingsExtracted: Array.isArray(analysisPackage?.content?.headings) ? analysisPackage.content.headings.length : 0,
+          paragraphsExtracted: Array.isArray(analysisPackage?.content?.paragraphs) ? analysisPackage.content.paragraphs.length : 0,
+          version: analysisPackage?.version || '1.2',
+          generatedAt: analysisPackage?.generatedAt || new Date().toISOString()
+        },
+        processingErrors: processingErrors.length > 0 ? processingErrors : undefined
+      });
+      
+    } catch (error) {
+      console.error(`[Auto-Analysis] Error during analysis: ${error.message}`);
+      console.error(error.stack);
+      broadcast('error', { message: `Analysis failed: ${error.message}` });
+      // Keep raw scrape data if analysis fails (as backup)
+      console.log(`[Auto-Analysis] Keeping raw scrape data as backup due to analysis failure`);
     }
   };
 
