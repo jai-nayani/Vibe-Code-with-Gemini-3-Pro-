@@ -133,7 +133,7 @@ async function uploadDirectoryToBucket(localDir, bucketName, scrapeId) {
 }
 
 // Delete raw scrape folder from GCS (after successful analysis)
-// Note: Preserves firecrawl/ folder, only deletes playwright data
+// Firecrawl data is saved to analysis/{id}/crawl/, so we can delete all scrapes/{id}/ data
 async function deleteRawScrapeFolder(bucketName, scrapeId) {
   const bucket = storage.bucket(bucketName);
   const prefix = `scrapes/${scrapeId}/`;
@@ -147,17 +147,9 @@ async function deleteRawScrapeFolder(bucketName, scrapeId) {
       return;
     }
     
-    // Filter out firecrawl folder - keep it for LLM
-    const filesToDelete = files.filter(file => !file.name.includes('/firecrawl/'));
-    
-    if (filesToDelete.length === 0) {
-      console.log(`[Auto-Analysis] Only firecrawl data found, nothing to delete`);
-      return;
-    }
-    
-    // Delete all files in parallel (excluding firecrawl)
-    await Promise.all(filesToDelete.map(file => file.delete()));
-    console.log(`[Auto-Analysis] Successfully deleted ${filesToDelete.length} files from ${prefix} (preserved firecrawl data)`);
+    // Delete all files in parallel
+    await Promise.all(files.map(file => file.delete()));
+    console.log(`[Auto-Analysis] Successfully deleted ${files.length} files from ${prefix}`);
   } catch (error) {
     console.error(`[Auto-Analysis] Error deleting raw scrape folder: ${error.message}`);
     throw error;
@@ -205,7 +197,7 @@ async function scrapeWithFirecrawl(url, scrapeId) {
   }
 }
 
-// Save Firecrawl data to GCS
+// Save Firecrawl data to GCS (in analysis folder)
 async function saveFirecrawlDataToGCS(bucketName, scrapeId, firecrawlData) {
   if (!firecrawlData) {
     return;
@@ -213,7 +205,7 @@ async function saveFirecrawlDataToGCS(bucketName, scrapeId, firecrawlData) {
   
   try {
     const bucket = storage.bucket(bucketName);
-    const filePath = `scrapes/${scrapeId}/firecrawl/firecrawl_data.json`;
+    const filePath = `analysis/${scrapeId}/crawl/firecrawl_data.json`;
     
     await bucket.file(filePath).save(JSON.stringify(firecrawlData, null, 2), {
       contentType: 'application/json',
@@ -337,8 +329,8 @@ app.post('/api/start', async (req, res) => {
       broadcast('analysis-complete', {
         scrapeId: scraper.scrapeId,
         analysisPackageUrl,
-        screenshotsPath: `analysis/${scraper.scrapeId}/screenshots/`,
-        dataPath: `analysis/${scraper.scrapeId}/data/`,
+        screenshotsPath: `analysis/${scraper.scrapeId}/scraper/screenshots/`,
+        dataPath: `analysis/${scraper.scrapeId}/scraper/data/`,
         metadata: {
           originalUrl: analysisPackage?.source?.originalUrl || 'unknown',
           pagesProcessed: analysisPackage?.structure?.pageCount || 0,
@@ -375,6 +367,7 @@ app.post('/api/start', async (req, res) => {
         console.log(`[Firecrawl] Data saved for scrape: ${scraper.scrapeId}`);
         broadcast('firecrawl-complete', {
           scrapeId: scraper.scrapeId,
+          crawlPath: `analysis/${scraper.scrapeId}/crawl/`,
           success: true
         });
       }
@@ -622,8 +615,9 @@ app.post('/api/prepare-for-analysis', async (req, res) => {
       success: true,
       analysisPackageUrl,
       scrapeId: targetScrapeId,
-      screenshotsPath: `analysis/${targetScrapeId}/screenshots/`,
-      dataPath: `analysis/${targetScrapeId}/data/`,
+      screenshotsPath: `analysis/${targetScrapeId}/scraper/screenshots/`,
+      dataPath: `analysis/${targetScrapeId}/scraper/data/`,
+      crawlPath: `analysis/${targetScrapeId}/crawl/`,
       metadata: {
         originalUrl: analysisPackage?.source?.originalUrl || 'unknown',
         pagesProcessed: analysisPackage?.structure?.pageCount || 0,

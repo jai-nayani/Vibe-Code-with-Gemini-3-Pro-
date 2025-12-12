@@ -394,7 +394,7 @@ export class AnalysisCompressor {
         const compressed = await this.compressScreenshot(buffer);
         const metadata = await sharp(compressed).metadata();
         const filename = screenshot.local_path.split('/').pop().replace('.png', '.jpg');
-        const outputPath = `analysis/${scrapeId}/screenshots/${filename}`;
+        const outputPath = `analysis/${scrapeId}/scraper/screenshots/${filename}`;
         await this.bucket.file(outputPath).save(compressed, { contentType: 'image/jpeg', metadata: { cacheControl: 'public, max-age=3600' } });
         const screenshotUrl = await this.getSignedUrl(outputPath);
         compressedScreenshots.push({
@@ -497,7 +497,7 @@ export class AnalysisCompressor {
 
     // STEP 5: SAVE JSON FILES TO data/ FOLDER
     this.log('STEP 5: Saving JSON files to data/ folder...');
-    const dataFolder = `analysis/${scrapeId}/data`;
+    const dataFolder = `analysis/${scrapeId}/scraper/data`;
 
     try {
       const textContentPath = `${dataFolder}/text_content.json`;
@@ -574,7 +574,7 @@ export class AnalysisCompressor {
   }
 
   async saveAnalysisPackage(scrapeId, analysisPackage) {
-    const outputPath = `analysis/${scrapeId}/analysis_package.json`;
+    const outputPath = `analysis/${scrapeId}/scraper/analysis_package.json`;
     await this.bucket.file(outputPath).save(JSON.stringify(analysisPackage, null, 2), { contentType: 'application/json' });
     this.log(`Saved: ${outputPath} (${Math.round(JSON.stringify(analysisPackage).length / 1024)}KB)`);
     return await this.getSignedUrl(outputPath);
