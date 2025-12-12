@@ -690,6 +690,46 @@ app.post('/api/prepare-for-analysis', async (req, res) => {
   }
 });
 
+// ===========================================
+// GET ANALYSIS PACKAGE BY SCRAPE ID (Proxy from GCS)
+// ===========================================
+app.get('/api/analysis/:scrapeId', async (req, res) => {
+  const { scrapeId } = req.params;
+  
+  try {
+    const bucket = storage.bucket(bucketName);
+    const filePath = `analysis/${scrapeId}/scraper/analysis_package.json`;
+    const file = bucket.file(filePath);
+    
+    // Check if file exists
+    const [exists] = await file.exists();
+    if (!exists) {
+      return res.status(404).json({
+        success: false,
+        error: `Analysis package not found for scrapeId: ${scrapeId}`
+      });
+    }
+    
+    // Download and return JSON
+    const [buffer] = await file.download();
+    const analysisPackage = JSON.parse(buffer.toString());
+    
+    res.json({
+      success: true,
+      scrapeId,
+      analysisPackage
+    });
+    
+  } catch (error) {
+    console.error(`[Analysis GET] Error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch analysis package',
+      details: error.message
+    });
+  }
+});
+
 // Start server
 server.listen(PORT, () => {
   console.log(`\n🌐 Website Scraper is running!`);
