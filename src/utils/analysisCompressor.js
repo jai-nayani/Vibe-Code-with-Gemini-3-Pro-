@@ -349,10 +349,10 @@ export class AnalysisCompressor {
       if (features.isSinglePage && Array.isArray(page.sections)) page.sections.forEach(s => { if (!pageTypes.includes(s)) pageTypes.push(s); });
     }
 
-    components.push({ type: 'navbar', variant: 'standard', count: 1 });
+      components.push({ type: 'navbar', variant: 'standard', count: 1 });
     if (pagesArray.some(p => p && Array.isArray(p.sections) && p.sections.includes('hero'))) {
-      components.push({ type: 'hero', variant: 'image-background', count: 1 });
-    }
+        components.push({ type: 'hero', variant: 'image-background', count: 1 });
+      }
     components.push({ type: 'footer', variant: 'standard', count: 1 });
 
     return { pageCount: pagesArray.length, pageTypes: [...new Set(pageTypes)], hierarchy, components, features, isSinglePage: features.isSinglePage };
@@ -366,8 +366,10 @@ export class AnalysisCompressor {
   }
 
   deduplicateArray(arr) {
+    if (!Array.isArray(arr)) return [];
     const seen = new Set();
     return arr.filter(item => {
+      if (item == null) return false;
       const normalized = (typeof item === 'string' ? item : JSON.stringify(item)).toLowerCase().substring(0, 100);
       if (seen.has(normalized)) return false;
       seen.add(normalized);
@@ -466,7 +468,7 @@ export class AnalysisCompressor {
       }
       if (allCss) {
         design = this.extractDesignTokens(allCss);
-        this.log(`  ✓ ${design.colors.all.length} colors, ${design.typography.fonts.length} fonts`);
+        this.log(`  ✓ ${design?.colors?.all?.length || 0} colors, ${design?.typography?.fonts?.length || 0} fonts`);
       }
     } catch (error) {
       this.log(`  ✗ Error: ${error.message}`);
@@ -477,19 +479,20 @@ export class AnalysisCompressor {
     // STEP 4: BUILD CONTENT OBJECTS
     this.log('STEP 4: Building content objects...');
     const structure = this.buildStructureMap(pages, scrapeLog);
+    const safeHeadings = Array.isArray(allHeadings) ? allHeadings.filter(h => h && h.text) : [];
     const textContent = {
-      siteTitle, siteDescription,
-      headings: this.deduplicateArray(allHeadings.map(h => h.text)).slice(0, 50),
-      headingsWithLevels: allHeadings.slice(0, 50),
-      paragraphs: this.deduplicateArray(allParagraphs).slice(0, 40),
-      listItems: this.deduplicateArray(allListItems).slice(0, 60),
-      cardContents: this.deduplicateArray(allCardContents).slice(0, 20),
-      navigation: [...allNavigation].slice(0, 30),
-      callsToAction: [...allCtas].slice(0, 20),
-      sections: [...allSections],
-      contactInfo: { phones: [...allPhones].slice(0, 5), emails: [...allEmails].slice(0, 5), socialLinks: allSocialLinks }
+      siteTitle: siteTitle || '', siteDescription: siteDescription || '',
+      headings: this.deduplicateArray(safeHeadings.map(h => h.text)).slice(0, 50),
+      headingsWithLevels: safeHeadings.slice(0, 50),
+      paragraphs: this.deduplicateArray(Array.isArray(allParagraphs) ? allParagraphs : []).slice(0, 40),
+      listItems: this.deduplicateArray(Array.isArray(allListItems) ? allListItems : []).slice(0, 60),
+      cardContents: this.deduplicateArray(Array.isArray(allCardContents) ? allCardContents : []).slice(0, 20),
+      navigation: Array.from(allNavigation).slice(0, 30),
+      callsToAction: Array.from(allCtas).slice(0, 20),
+      sections: Array.from(allSections),
+      contactInfo: { phones: Array.from(allPhones).slice(0, 5), emails: Array.from(allEmails).slice(0, 5), socialLinks: allSocialLinks || {} }
     };
-    this.log(`  ${textContent.headings.length} headings, ${textContent.paragraphs.length} paragraphs, ${textContent.listItems.length} list items`);
+    this.log(`  ${textContent.headings?.length || 0} headings, ${textContent.paragraphs?.length || 0} paragraphs, ${textContent.listItems?.length || 0} list items`);
     this.log('STEP 4 COMPLETE');
 
     // STEP 5: SAVE JSON FILES TO data/ FOLDER
@@ -565,7 +568,7 @@ export class AnalysisCompressor {
     }
 
     this.log('STEP 6 COMPLETE');
-    this.log(`=== ANALYSIS COMPLETE: ${compressedScreenshots.length} screenshots, ${textContent.headings.length} headings, ${textContent.paragraphs.length} paragraphs ===`);
+    this.log(`=== ANALYSIS COMPLETE: ${compressedScreenshots.length} screenshots, ${textContent.headings?.length || 0} headings, ${textContent.paragraphs?.length || 0} paragraphs ===`);
 
     return { analysisPackage, processingErrors };
   }
