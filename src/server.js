@@ -25,6 +25,28 @@ const bucketName = 'vibe-scraper-output';
 let scraper = null;
 let clients = new Set();
 
+// Delete all objects under a prefix (best-effort)
+async function deleteGcsPrefix(bucketName, prefix) {
+  const bucket = storage.bucket(bucketName);
+  try {
+    console.log(`[Cleanup] Deleting GCS prefix: ${prefix}`);
+    // force:true continues on individual delete errors
+    await bucket.deleteFiles({ prefix, force: true });
+    // Also try to remove potential "folder marker" objects
+    await bucket.file(prefix).delete({ ignoreNotFound: true }).catch(() => {});
+    await bucket.file(prefix.replace(/\/$/, '')).delete({ ignoreNotFound: true }).catch(() => {});
+    console.log(`[Cleanup] Deleted GCS prefix: ${prefix}`);
+  } catch (error) {
+    console.error(`[Cleanup] Failed deleting prefix ${prefix}: ${error.message}`);
+  }
+}
+
+// Keep only the latest dataset: wipe previous analysis + scrapes before starting a new run
+async function cleanupBucketForNewRun(bucketName) {
+  await deleteGcsPrefix(bucketName, 'analysis/');
+  await deleteGcsPrefix(bucketName, 'scrapes/');
+}
+
 // Middleware
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
@@ -263,6 +285,16 @@ app.post('/api/start', async (req, res) => {
   // Check if already running
   if (scraper && scraper.isRunning) {
     return res.status(409).json({ error: 'Scraper is already running. Stop it first.' });
+  }
+
+  // NEW: Delete any existing data so bucket only contains the latest run
+  try {
+    broadcast('log', { message: '[Cleanup] Removing previous bucket data (analysis/ and scrapes/)...', timestamp: new Date().toISOString() });
+    await cleanupBucketForNewRun(bucketName);
+    broadcast('log', { message: '[Cleanup] Done. Starting fresh scrape...', timestamp: new Date().toISOString() });
+  } catch (e) {
+    // Best-effort; continue even if cleanup partially fails
+    console.error('[Cleanup] Unexpected cleanup error:', e?.message || e);
   }
 
   // Get next run number and create output directory path
