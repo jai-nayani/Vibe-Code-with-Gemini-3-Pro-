@@ -713,10 +713,21 @@ export class AnalysisCompressor {
     this.log('STEP 5: Saving JSON files to data/ folder...');
     const dataFolder = `analysis/${scrapeId}/scraper/data`;
 
+    // Add full text pages to textContent object
+    const textContentWithFullText = {
+      ...textContent,
+      fullTextPages: fullTextPages.map(page => ({
+        url: page.url,
+        path: page.path,
+        title: page.title,
+        text: page.text
+      }))
+    };
+
     try {
       const textContentPath = `${dataFolder}/text_content.json`;
-      await this.bucket.file(textContentPath).save(JSON.stringify(textContent, null, 2), { contentType: 'application/json' });
-      this.log(`  ✓ ${textContentPath}`);
+      await this.bucket.file(textContentPath).save(JSON.stringify(textContentWithFullText, null, 2), { contentType: 'application/json' });
+      this.log(`  ✓ ${textContentPath} (includes full text from ${fullTextPages.length} pages)`);
     } catch (error) {
       this.log(`  ✗ text_content.json: ${error.message}`);
       processingErrors.push({ type: 'save', file: 'text_content.json', error: error.message });
@@ -749,32 +760,6 @@ export class AnalysisCompressor {
       processingErrors.push({ type: 'save', file: 'pages_content.json', error: error.message });
     }
 
-    // Save combined full text file (entire website text)
-    try {
-      const fullTextPath = `${dataFolder}/full_text.txt`;
-      // Combine all pages' full text with clear separators
-      let combinedText = `FULL WEBSITE TEXT EXTRACTION\n`;
-      combinedText += `Scraped from: ${scrapeLog.target_url}\n`;
-      combinedText += `Total Pages: ${fullTextPages.length}\n`;
-      combinedText += `Generated: ${new Date().toISOString()}\n`;
-      combinedText += `${'='.repeat(80)}\n\n`;
-
-      for (const pageData of fullTextPages) {
-        combinedText += `\n${'='.repeat(80)}\n`;
-        combinedText += `PAGE: ${pageData.title}\n`;
-        combinedText += `URL: ${pageData.url}\n`;
-        combinedText += `PATH: ${pageData.path}\n`;
-        combinedText += `${'-'.repeat(80)}\n\n`;
-        combinedText += `${pageData.text}\n\n`;
-      }
-
-      await this.bucket.file(fullTextPath).save(combinedText, { contentType: 'text/plain; charset=utf-8' });
-      this.log(`  ✓ ${fullTextPath} (${fullTextPages.length} pages, ${Math.round(combinedText.length / 1024)}KB)`);
-    } catch (error) {
-      this.log(`  ✗ full_text.txt: ${error.message}`);
-      processingErrors.push({ type: 'save', file: 'full_text.txt', error: error.message });
-    }
-
     this.log('STEP 5 COMPLETE');
 
     // STEP 6: BUILD FINAL PACKAGE
@@ -783,19 +768,18 @@ export class AnalysisCompressor {
     const structureUrl = await this.getSignedUrl(`${dataFolder}/site_structure.json`);
     const designUrl = await this.getSignedUrl(`${dataFolder}/design_tokens.json`);
     const pagesUrl = await this.getSignedUrl(`${dataFolder}/pages_content.json`);
-    const fullTextUrl = await this.getSignedUrl(`${dataFolder}/full_text.txt`);
 
     const analysisPackage = {
       version: '1.2', generatedAt: new Date().toISOString(),
       source: { scrapeId, originalUrl: scrapeLog.target_url, scrapedAt: scrapeLog.started_at, pagesScraped: scrapeLog.stats?.pages_scraped || pages.length, screenshotsTotal: scrapeLog.screenshots?.length || 0, screenshotsSelected: compressedScreenshots.length },
-      files: { textContent: textContentUrl, siteStructure: structureUrl, designTokens: designUrl, pagesContent: pagesUrl, fullText: fullTextUrl },
+      files: { textContent: textContentUrl, siteStructure: structureUrl, designTokens: designUrl, pagesContent: pagesUrl },
       folders: {
         data: `${dataFolder}/`,
         screenshots: `analysis/${scrapeId}/scraper/screenshots/`,
         images: `analysis/${scrapeId}/scraper/images/`
       },
       screenshots: compressedScreenshots,
-      content: textContent,
+      content: textContentWithFullText,
       design, structure,
       assets: {
         logo: { found: false, url: null },
