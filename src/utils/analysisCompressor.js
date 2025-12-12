@@ -81,14 +81,14 @@ export class AnalysisCompressor {
 
   async selectKeyScreenshots(scrapeId, scrapeLog) {
     this.log('Selecting key screenshots...');
-    const screenshots = scrapeLog.screenshots || [];
-    const successScreenshots = screenshots.filter(s => s.status === 'success');
+    const screenshots = Array.isArray(scrapeLog.screenshots) ? scrapeLog.screenshots : [];
+    const successScreenshots = screenshots.filter(s => s && s.status === 'success').filter(Boolean);
     
     this.log(`Total screenshots: ${screenshots.length}, successful: ${successScreenshots.length}`);
 
-    const hasOnlyIndexPages = successScreenshots.every(s => 
-      s.local_path?.includes('screenshot_index_') || 
-      s.local_path?.includes('/index')
+    const hasOnlyIndexPages = successScreenshots.length > 0 && successScreenshots.every(s => 
+      s && (s.local_path?.includes('screenshot_index_') || 
+      s.local_path?.includes('/index'))
     );
     
     const isSinglePageApp = hasOnlyIndexPages || (scrapeLog.stats?.pages_scraped === 1);
@@ -122,28 +122,28 @@ export class AnalysisCompressor {
       }
     } else {
       const homeInitial = successScreenshots.find(s => s.local_path?.includes('screenshot_index_initial'));
-      if (homeInitial) {
-        selected.push({ ...homeInitial, priority: 'home-initial' });
-      }
+    if (homeInitial) {
+      selected.push({ ...homeInitial, priority: 'home-initial' });
+    }
 
       const homeInteractive = successScreenshots.filter(s =>
         s.local_path?.includes('screenshot_index_') && !s.local_path?.includes('_initial')
       ).slice(0, 5);
-      selected.push(...homeInteractive.map(s => ({ ...s, priority: 'home-interactive' })));
+    selected.push(...homeInteractive.map(s => ({ ...s, priority: 'home-interactive' })));
 
       const otherInitials = successScreenshots.filter(s =>
         !s.local_path?.includes('screenshot_index_') && s.local_path?.includes('_initial')
       ).slice(0, 5);
-      selected.push(...otherInitials.map(s => ({ ...s, priority: 'page-initial' })));
+    selected.push(...otherInitials.map(s => ({ ...s, priority: 'page-initial' })));
 
-      const remaining = maxScreenshots - selected.length;
-      if (remaining > 0) {
+    const remaining = maxScreenshots - selected.length;
+    if (remaining > 0) {
         const otherInteractive = successScreenshots.filter(s =>
-          !s.local_path?.includes('screenshot_index_') &&
-          !s.local_path?.includes('_initial') &&
-          !selected.some(sel => sel.local_path === s.local_path)
-        ).slice(0, remaining);
-        selected.push(...otherInteractive.map(s => ({ ...s, priority: 'page-interactive' })));
+        !s.local_path?.includes('screenshot_index_') &&
+        !s.local_path?.includes('_initial') &&
+        !selected.some(sel => sel.local_path === s.local_path)
+      ).slice(0, remaining);
+      selected.push(...otherInteractive.map(s => ({ ...s, priority: 'page-interactive' })));
       }
     }
 
@@ -331,27 +331,31 @@ export class AnalysisCompressor {
   }
 
   buildStructureMap(pages, scrapeLog) {
+    const pagesArray = Array.isArray(pages) ? pages : [];
     const pageTypes = [], hierarchy = {}, components = [];
-    const features = { hasMobileNav: false, hasSearch: false, hasBlog: false, hasEcommerce: false, hasForms: false, hasVideo: false, hasMap: false, hasSocialLinks: false, isSinglePage: pages.length === 1 };
+    const features = { hasMobileNav: false, hasSearch: false, hasBlog: false, hasEcommerce: false, hasForms: false, hasVideo: false, hasMap: false, hasSocialLinks: false, isSinglePage: pagesArray.length === 1 };
 
-    for (const page of pages) {
+    for (const page of pagesArray) {
+      if (!page) continue;
       const pathLower = (page.path || '').toLowerCase();
       const textLower = (page.bodyText || '').toLowerCase();
       if (pathLower.includes('index')) pageTypes.push('home');
       if (textLower.includes('about')) pageTypes.push('about');
       if (textLower.includes('contact')) pageTypes.push('contact');
       if (textLower.includes('portfolio') || textLower.includes('project')) pageTypes.push('portfolio');
-      page.navigation?.forEach(n => { if (!hierarchy[n]) hierarchy[n] = pathLower; });
+      if (Array.isArray(page.navigation)) page.navigation.forEach(n => { if (!hierarchy[n]) hierarchy[n] = pathLower; });
       if (textLower.includes('linkedin') || textLower.includes('github')) features.hasSocialLinks = true;
       if (textLower.includes('form') || textLower.includes('submit')) features.hasForms = true;
-      if (features.isSinglePage && page.sections) page.sections.forEach(s => { if (!pageTypes.includes(s)) pageTypes.push(s); });
+      if (features.isSinglePage && Array.isArray(page.sections)) page.sections.forEach(s => { if (!pageTypes.includes(s)) pageTypes.push(s); });
     }
 
     components.push({ type: 'navbar', variant: 'standard', count: 1 });
-    if (pages.some(p => p.sections?.includes('hero'))) components.push({ type: 'hero', variant: 'image-background', count: 1 });
+    if (pagesArray.some(p => p && Array.isArray(p.sections) && p.sections.includes('hero'))) {
+      components.push({ type: 'hero', variant: 'image-background', count: 1 });
+    }
     components.push({ type: 'footer', variant: 'standard', count: 1 });
 
-    return { pageCount: pages.length, pageTypes: [...new Set(pageTypes)], hierarchy, components, features, isSinglePage: features.isSinglePage };
+    return { pageCount: pagesArray.length, pageTypes: [...new Set(pageTypes)], hierarchy, components, features, isSinglePage: features.isSinglePage };
   }
 
   extractMeaningfulDisplayName(filename) {
@@ -413,7 +417,8 @@ export class AnalysisCompressor {
     const allParagraphs = [], allListItems = [], allCardContents = [], allHeadings = [];
     let siteTitle = '', siteDescription = '';
 
-    for (const pageInfo of (scrapeLog.pages || [])) {
+    const pagesList = Array.isArray(scrapeLog.pages) ? scrapeLog.pages : [];
+    for (const pageInfo of pagesList) {
       try {
         const gcsPath = `scrapes/${scrapeId}/${pageInfo.local_path}`;
         const [buffer] = await this.bucket.file(gcsPath).download();
@@ -422,21 +427,25 @@ export class AnalysisCompressor {
           siteTitle = extracted.title;
           siteDescription = extracted.metaDescription;
         }
-        extracted.navigation.forEach(n => allNavigation.add(n));
-        extracted.ctas.forEach(c => allCtas.add(c));
-        extracted.contactInfo.phones.forEach(p => allPhones.add(p));
-        extracted.contactInfo.emails.forEach(e => allEmails.add(e));
-        extracted.sections.forEach(s => allSections.add(s));
-        allParagraphs.push(...extracted.paragraphs);
-        allListItems.push(...extracted.listItems);
-        allCardContents.push(...extracted.cardContents);
-        allHeadings.push(...extracted.headingsWithLevels);
-        Object.assign(allSocialLinks, extracted.contactInfo.socialLinks);
+        if (Array.isArray(extracted.navigation)) extracted.navigation.forEach(n => allNavigation.add(n));
+        if (Array.isArray(extracted.ctas)) extracted.ctas.forEach(c => allCtas.add(c));
+        if (extracted.contactInfo && Array.isArray(extracted.contactInfo.phones)) extracted.contactInfo.phones.forEach(p => allPhones.add(p));
+        if (extracted.contactInfo && Array.isArray(extracted.contactInfo.emails)) extracted.contactInfo.emails.forEach(e => allEmails.add(e));
+        if (Array.isArray(extracted.sections)) extracted.sections.forEach(s => allSections.add(s));
+        if (Array.isArray(extracted.paragraphs)) allParagraphs.push(...extracted.paragraphs);
+        if (Array.isArray(extracted.listItems)) allListItems.push(...extracted.listItems);
+        if (Array.isArray(extracted.cardContents)) allCardContents.push(...extracted.cardContents);
+        if (Array.isArray(extracted.headingsWithLevels)) allHeadings.push(...extracted.headingsWithLevels);
+        if (extracted.contactInfo && extracted.contactInfo.socialLinks) Object.assign(allSocialLinks, extracted.contactInfo.socialLinks);
         pages.push({
-          path: new URL(pageInfo.url).pathname, title: extracted.title,
-          headings: extracted.headings.slice(0, 20), headingsWithLevels: extracted.headingsWithLevels?.slice(0, 20),
-          paragraphs: extracted.paragraphs.slice(0, 15), listItems: extracted.listItems.slice(0, 30),
-          bodyText: extracted.bodyText.substring(0, 8000), sections: extracted.sections, wordCount: extracted.wordCount
+          path: new URL(pageInfo.url).pathname, title: extracted.title || '',
+          headings: Array.isArray(extracted.headings) ? extracted.headings.slice(0, 20) : [],
+          headingsWithLevels: Array.isArray(extracted.headingsWithLevels) ? extracted.headingsWithLevels.slice(0, 20) : [],
+          paragraphs: Array.isArray(extracted.paragraphs) ? extracted.paragraphs.slice(0, 15) : [],
+          listItems: Array.isArray(extracted.listItems) ? extracted.listItems.slice(0, 30) : [],
+          bodyText: (extracted.bodyText || '').substring(0, 8000),
+          sections: Array.isArray(extracted.sections) ? extracted.sections : [],
+          wordCount: extracted.wordCount || 0
         });
         this.log(`  ✓ ${pageInfo.local_path} (${extracted.wordCount} words)`);
       } catch (error) {
