@@ -730,6 +730,209 @@ app.get('/api/analysis/:scrapeId', async (req, res) => {
   }
 });
 
+// ===========================================
+// GET BUNDLE (All files combined for Gemini)
+// Hackathon-friendly: single payload under 10MB
+// ===========================================
+app.get('/api/bundle/:scrapeId', async (req, res) => {
+  const { scrapeId } = req.params;
+  const { maxImages = 5, maxTextPerFile = 500000 } = req.query; // Query params for limits
+  
+  try {
+    const bucket = storage.bucket(bucketName);
+    const prefix = `analysis/${scrapeId}/`;
+    
+    console.log(`[Bundle] Building bundle for scrapeId: ${scrapeId}`);
+    
+    // List all files under analysis/{scrapeId}/
+    const [files] = await bucket.getFiles({ prefix });
+    
+    if (files.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: `No analysis files found for scrapeId: ${scrapeId}`
+      });
+    }
+    
+    const bundle = {
+      scrapeId,
+      generatedAt: new Date().toISOString(),
+      files: {},
+      images: [],
+      totalSizeBytes: 0,
+      fileCount: 0
+    };
+    
+    let imageCount = 0;
+    const maxImagesInt = parseInt(maxImages, 10);
+    const maxTextInt = parseInt(maxTextPerFile, 10);
+    
+    // Separate files by type for prioritization
+    const imageFiles = [];
+    const textFiles = [];
+    const otherFiles = [];
+    
+    for (const file of files) {
+      const fileName = file.name;
+      const relativePath = fileName.replace(prefix, '');
+      
+      if (!relativePath || relativePath.endsWith('/')) continue;
+      
+      if (/\.(jpg|jpeg|png|webp|gif|svg)$/i.test(fileName)) {
+        imageFiles.push(file);
+      } else if (/\.(json|txt|html|css|js|md)$/i.test(fileName) || fileName.includes('firecrawl_data')) {
+        textFiles.push(file);
+      } else {
+        otherFiles.push(file);
+      }
+    }
+    
+    // Sort images: prioritize screenshots, then by size (smaller first to fit more)
+    imageFiles.sort((a, b) => {
+      const aIsScreenshot = a.name.includes('screenshot') || a.name.includes('scraper/screenshots');
+      const bIsScreenshot = b.name.includes('screenshot') || b.name.includes('scraper/screenshots');
+      if (aIsScreenshot && !bIsScreenshot) return -1;
+      if (!aIsScreenshot && bIsScreenshot) return 1;
+      return 0; // Keep original order for same priority
+    });
+    
+    // Process text files first
+    for (const file of textFiles) {
+      const fileName = file.name;
+      const relativePath = fileName.replace(prefix, '');
+      
+      try {
+        const [buffer] = await file.download();
+        const sizeBytes = buffer.length;
+        const textContent = buffer.toString('utf-8');
+        let content = textContent;
+        
+        // Truncate if too large
+        if (textContent.length > maxTextInt) {
+          content = textContent.substring(0, maxTextInt) + `\n\n...[TRUNCATED: ${textContent.length - maxTextInt} more characters]...`;
+        }
+        
+        bundle.files[relativePath] = {
+          type: 'text',
+          content,
+          sizeBytes,
+          truncated: textContent.length > maxTextInt ? (textContent.length - maxTextInt) : 0
+        };
+        
+        bundle.totalSizeBytes += buffer.length;
+        bundle.fileCount++;
+      } catch (error) {
+        console.error(`[Bundle] Error processing text file ${fileName}: ${error.message}`);
+        bundle.files[relativePath] = {
+          type: 'error',
+          error: error.message
+        };
+      }
+    }
+    
+    // Process images (prioritized screenshots)
+    for (const file of imageFiles) {
+      const fileName = file.name;
+      const relativePath = fileName.replace(prefix, '');
+      
+      try {
+        const [buffer] = await file.download();
+        const sizeBytes = buffer.length;
+        
+        // Limit image count to stay under 10MB
+        if (imageCount < maxImagesInt) {
+          const base64 = buffer.toString('base64');
+          const mimeType = fileName.endsWith('.svg') ? 'image/svg+xml' :
+                         fileName.endsWith('.webp') ? 'image/webp' :
+                         fileName.endsWith('.png') ? 'image/png' :
+                         fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') ? 'image/jpeg' :
+                         'image/gif';
+          
+          bundle.images.push({
+            path: relativePath,
+            mimeType,
+            base64,
+            sizeBytes,
+            // Include in Gemini multimodal format
+            inlineData: {
+              mimeType,
+              data: base64
+            }
+          });
+          
+          bundle.totalSizeBytes += sizeBytes;
+          imageCount++;
+        } else {
+          // Include manifest entry for images beyond limit
+          if (!bundle.imageManifest) bundle.imageManifest = [];
+          bundle.imageManifest.push({
+            path: relativePath,
+            sizeBytes,
+            note: 'Not included in bundle (limit reached), use signed URL from analysis_package.json'
+          });
+        }
+      } catch (error) {
+        console.error(`[Bundle] Error processing image ${fileName}: ${error.message}`);
+        if (!bundle.imageManifest) bundle.imageManifest = [];
+        bundle.imageManifest.push({
+          path: relativePath,
+          error: error.message
+        });
+      }
+    }
+    
+    // Process other files (metadata only)
+    for (const file of otherFiles) {
+      const fileName = file.name;
+      const relativePath = fileName.replace(prefix, '');
+      
+      try {
+        const [metadata] = await file.getMetadata();
+        bundle.files[relativePath] = {
+          type: 'binary',
+          sizeBytes: parseInt(metadata.size || 0, 10),
+          note: 'Binary file not included in bundle'
+        };
+      } catch (error) {
+        bundle.files[relativePath] = {
+          type: 'error',
+          error: error.message
+        };
+      }
+    }
+    
+    // Calculate final size including base64 overhead (~33% increase)
+    // Base64 size is already in buffer.length, but we need to account for JSON encoding
+    const jsonSize = JSON.stringify(bundle).length;
+    bundle.totalSizeBytes = jsonSize;
+    bundle.totalSizeMB = (bundle.totalSizeBytes / (1024 * 1024)).toFixed(2);
+    
+    console.log(`[Bundle] Created bundle: ${bundle.fileCount} text files, ${bundle.images.length} images, ${bundle.totalSizeMB}MB`);
+    
+    res.json({
+      success: true,
+      scrapeId,
+      bundle,
+      metadata: {
+        totalFiles: bundle.fileCount + bundle.images.length,
+        textFiles: bundle.fileCount,
+        imagesIncluded: bundle.images.length,
+        imagesOmitted: bundle.imageManifest?.length || 0,
+        totalSizeMB: bundle.totalSizeMB,
+        readyForGemini: parseFloat(bundle.totalSizeMB) < 10 // Under 10MB limit
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[Bundle] Error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create bundle',
+      details: error.message
+    });
+  }
+});
+
 // Start server
 server.listen(PORT, () => {
   console.log(`\n🌐 Website Scraper is running!`);
