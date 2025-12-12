@@ -160,6 +160,186 @@ export class AnalysisCompressor {
     return await sharp(buffer).resize(1280, null, { withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
   }
 
+  getImageTagSubdir(type = 'img_tag') {
+    const typeToDir = {
+      img_tag: 'img_tags',
+      css_background: 'css_backgrounds',
+      svg_inline: 'svg_inline',
+      favicon: 'favicons',
+      og_meta: 'og_meta'
+    };
+    return typeToDir[type] || 'img_tags';
+  }
+
+  getContentTypeForPath(filePath) {
+    const lower = (filePath || '').toLowerCase();
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.svg')) return 'image/svg+xml';
+    if (lower.endsWith('.ico')) return 'image/x-icon';
+    return 'application/octet-stream';
+  }
+
+  isRasterImagePath(filePath) {
+    const lower = (filePath || '').toLowerCase();
+    return (
+      lower.endsWith('.png') ||
+      lower.endsWith('.jpg') ||
+      lower.endsWith('.jpeg') ||
+      lower.endsWith('.webp') ||
+      lower.endsWith('.gif') ||
+      lower.endsWith('.ico')
+    );
+  }
+
+  async compressImageToTargetWebp(buffer, targetBytes) {
+    // Best-effort: try to hit <= targetBytes by lowering quality and (if needed) resizing down.
+    // Always outputs WebP for best size/quality ratio and transparency support.
+    const minTarget = Math.max(2048, Math.floor(targetBytes)); // avoid absurdly tiny targets
+
+    let img = sharp(buffer, { failOn: 'none' });
+    let meta;
+    try {
+      meta = await img.metadata();
+    } catch {
+      meta = {};
+    }
+
+    let width = meta.width || null;
+    const minWidth = Math.max(160, Math.floor((meta.width || 800) * 0.25));
+
+    const tryEncode = async (w, quality) => {
+      let pipeline = sharp(buffer, { failOn: 'none' });
+      if (w && meta.width && w < meta.width) {
+        pipeline = pipeline.resize(w, null, { withoutEnlargement: true });
+      }
+      return await pipeline.webp({ quality, effort: 4 }).toBuffer();
+    };
+
+    // Phase 1: quality sweep at original size
+    let best = null;
+    for (const q of [80, 70, 60, 50, 40, 35, 30]) {
+      const out = await tryEncode(null, q);
+      if (!best || out.length < best.length) best = out;
+      if (out.length <= minTarget) return { buffer: out, reachedTarget: true, strategy: `webp_q${q}` };
+    }
+
+    // Phase 2: downscale + quality sweep
+    let currentWidth = width;
+    for (let i = 0; i < 6; i++) {
+      if (!meta.width || !currentWidth) break;
+      currentWidth = Math.floor(currentWidth * 0.85);
+      if (currentWidth < minWidth) break;
+
+      for (const q of [70, 60, 50, 40, 35, 30]) {
+        const out = await tryEncode(currentWidth, q);
+        if (!best || out.length < best.length) best = out;
+        if (out.length <= minTarget) return { buffer: out, reachedTarget: true, strategy: `webp_w${currentWidth}_q${q}` };
+      }
+    }
+
+    return { buffer: best || buffer, reachedTarget: (best?.length || buffer.length) <= minTarget, strategy: 'webp_best_effort' };
+  }
+
+  async processAndSaveWebsiteImages(scrapeId, scrapeLog, maxImages = 250) {
+    this.log(`STEP 4.5: Exporting website images (cap ${maxImages})...`);
+
+    const images = Array.isArray(scrapeLog.images) ? scrapeLog.images : [];
+    const candidates = images
+      .filter(i => i && i.status === 'success' && typeof i.local_path === 'string')
+      .filter(i => i.local_path.startsWith('images/'))
+      .slice(0, maxImages);
+
+    if (candidates.length === 0) {
+      this.log('  No website images found to export');
+      return { manifestPath: null, imagesFolder: `analysis/${scrapeId}/scraper/images/`, exportedCount: 0 };
+    }
+
+    const manifest = {
+      scrapeId,
+      exportedAt: new Date().toISOString(),
+      maxImages,
+      exportedCount: 0,
+      items: []
+    };
+
+    for (const img of candidates) {
+      try {
+        const srcGcsPath = `scrapes/${scrapeId}/${img.local_path}`;
+        const [srcBuf] = await this.bucket.file(srcGcsPath).download();
+        const originalBytes = srcBuf.length;
+        const targetBytes = Math.floor(originalBytes * 0.3);
+
+        const type = img.type || 'img_tag';
+        const tagDir = this.getImageTagSubdir(type);
+        const baseName = (img.local_path.split('/').pop() || 'image').replace(/\.(png|jpg|jpeg|webp|gif|ico)$/i, '');
+
+        // SVGs: keep as-is (already small and vector)
+        if ((img.local_path || '').toLowerCase().endsWith('.svg') || type === 'svg_inline') {
+          const outPath = `analysis/${scrapeId}/scraper/images/${tagDir}/${baseName}.svg`;
+          await this.bucket.file(outPath).save(srcBuf, { contentType: 'image/svg+xml' });
+          const signedUrl = await this.getSignedUrl(outPath);
+          manifest.items.push({
+            type,
+            originalUrl: img.url,
+            sourcePath: srcGcsPath,
+            outputPath: outPath,
+            signedUrl,
+            originalBytes,
+            outputBytes: originalBytes,
+            reduction: 0,
+            reachedTarget: true,
+            format: 'svg'
+          });
+          manifest.exportedCount++;
+          continue;
+        }
+
+        if (!this.isRasterImagePath(img.local_path)) {
+          // Unknown/non-image file in images/ — skip
+          continue;
+        }
+
+        const { buffer: compressed, reachedTarget, strategy } = await this.compressImageToTargetWebp(srcBuf, targetBytes);
+        const outputBytes = compressed.length;
+        const reduction = originalBytes > 0 ? Math.round((1 - outputBytes / originalBytes) * 100) : 0;
+
+        const outPath = `analysis/${scrapeId}/scraper/images/${tagDir}/${baseName}.webp`;
+        await this.bucket.file(outPath).save(compressed, { contentType: 'image/webp', metadata: { cacheControl: 'public, max-age=3600' } });
+
+        const signedUrl = await this.getSignedUrl(outPath);
+        manifest.items.push({
+          type,
+          originalUrl: img.url,
+          sourcePath: srcGcsPath,
+          outputPath: outPath,
+          signedUrl,
+          originalBytes,
+          outputBytes,
+          targetBytes,
+          reductionPercent: reduction,
+          reachedTarget,
+          strategy,
+          format: 'webp'
+        });
+        manifest.exportedCount++;
+      } catch (e) {
+        // Best-effort; continue exporting others
+        // eslint-disable-next-line no-console
+        console.error(`[AnalysisCompressor] Image export error: ${e.message}`);
+      }
+    }
+
+    const manifestPath = `analysis/${scrapeId}/scraper/images/images_manifest.json`;
+    await this.bucket.file(manifestPath).save(JSON.stringify(manifest, null, 2), { contentType: 'application/json' });
+    this.log(`  ✓ Exported ${manifest.exportedCount} images to analysis/${scrapeId}/scraper/images/`);
+    this.log('STEP 4.5 COMPLETE');
+
+    return { manifestPath, imagesFolder: `analysis/${scrapeId}/scraper/images/`, exportedCount: manifest.exportedCount };
+  }
+
   extractTextFromHtml(htmlContent, pageUrl = '') {
     const $ = cheerio.load(htmlContent);
     $('script, style, noscript, iframe, svg').remove();
@@ -495,6 +675,15 @@ export class AnalysisCompressor {
     this.log(`  ${textContent.headings?.length || 0} headings, ${textContent.paragraphs?.length || 0} paragraphs, ${textContent.listItems?.length || 0} list items`);
     this.log('STEP 4 COMPLETE');
 
+    // STEP 4.5: EXPORT WEBSITE IMAGES (compressed)
+    let exportedImages = { manifestPath: null, imagesFolder: `analysis/${scrapeId}/scraper/images/`, exportedCount: 0 };
+    try {
+      exportedImages = await this.processAndSaveWebsiteImages(scrapeId, scrapeLog, 250);
+    } catch (e) {
+      this.log(`  ✗ Image export error: ${e.message}`);
+      processingErrors.push({ type: 'images', error: e.message });
+    }
+
     // STEP 5: SAVE JSON FILES TO data/ FOLDER
     this.log('STEP 5: Saving JSON files to data/ folder...');
     const dataFolder = `analysis/${scrapeId}/scraper/data`;
@@ -551,7 +740,16 @@ export class AnalysisCompressor {
       screenshots: compressedScreenshots,
       content: textContent,
       design, structure,
-      assets: { logo: { found: false, url: null }, images: { total: scrapeLog.stats?.images_downloaded || 0 }, icons: { hasFavicon: scrapeLog.images?.some(i => i.type === 'favicon') || false } },
+      assets: {
+        logo: { found: false, url: null },
+        images: {
+          total: scrapeLog.stats?.images_downloaded || 0,
+          exportedCompressed: exportedImages.exportedCount,
+          folder: exportedImages.imagesFolder,
+          manifestPath: exportedImages.manifestPath
+        },
+        icons: { hasFavicon: Array.isArray(scrapeLog.images) ? scrapeLog.images.some(i => i.type === 'favicon') : false }
+      },
       seoData: { hasMetaDescription: !!siteDescription, hasOgTags: false }
     };
 
