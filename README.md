@@ -22,7 +22,7 @@ A full-featured website scraper with a Web UI for gathering website content and 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/jai-nayani/Vibe-Code-with-Gemini-3-Pro-.git
+   git clone https://github.com/varsha-km1/Vibe-Code-with-Gemini-3-Pro-.git
    cd Vibe-Code-with-Gemini-3-Pro-
    cd Vibe-Code-with-Gemini-3-Pro--claude-website-scraper-ui-01DUUqh2QE8xmFj4L2jDapGR
    ```
